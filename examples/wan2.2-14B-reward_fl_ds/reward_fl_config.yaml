@@ -32,12 +32,12 @@ actor_train:
     model_type: diffusion_module
     dtype: bf16
     model_config_kwargs:
-      model_name: wan2_2
-      model_paths: ./examples/wan2.2-14B-reward_fl_ds/wan22_paths.json
+      model_name: wan2_1
+      model_paths: ./examples/wan2.2-14B-reward_fl_ds/wan21_paths.json
       reward_model_path: /data/models/antelopev2/
       tokenizer_path: /data/models/Wan-AI/Wan2.1-T2V-1.3B/google/umt5-xxl/
       model_id_with_origin_paths: null
-      trainable_models: dit2
+      trainable_models: dit
       use_gradient_checkpointing_offload: true
       extra_inputs: input_image
       max_timestep_boundary: 1.0

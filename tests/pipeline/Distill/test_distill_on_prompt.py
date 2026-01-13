@@ -32,7 +32,7 @@ def test_preprocess_dataset_with_real_data():
     pipeline_config = DistillConfig(
         student=student_cfg,
         teacher=teacher_cfg,
-        query_key="question_zh",
+        question_key="question_zh",
         response_key="answer_zh",
         distill_on_prompt=True,
         sequence_length=256

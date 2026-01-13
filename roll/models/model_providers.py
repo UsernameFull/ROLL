@@ -304,7 +304,7 @@ def default_diffusion_module_provider(
     training_args: TrainingArguments = None,
     is_trainable: Optional[bool] = False,
 ):
-    if model_args.model_config_kwargs["model_name"] == "wan2_2":
+    if model_args.model_config_kwargs["model_name"] in ["wan2_2", "wan2_1"]:
         from roll.pipeline.diffusion.modules.wan_module import WanTrainingModule
         print(f"{model_args.model_config_kwargs=}")
         training_module =  WanTrainingModule(**model_args.model_config_kwargs)

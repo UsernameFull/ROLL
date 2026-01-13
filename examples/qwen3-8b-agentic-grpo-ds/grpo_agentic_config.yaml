@@ -1,0 +1,181 @@
+# Qwen3-8B Agentic Training Configuration
+# Backend: DeepSpeed, Algorithm: GRPO, Pipeline: Agentic
+defaults:
+  - ../config/traj_envs@_here_
+  - ../config/deepspeed_zero2@_here_
+  - ../config/deepspeed_zero3@_here_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "qwen3-8b-agentic-grpo-deepspeed"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+render_save_dir: ./output/render
+system_envs:
+  USE_MODELSCOPE: '1'
+
+# =====================
+# Tracking Configuration
+# =====================
+
+checkpoint_config:
+  type: file_system
+  output_dir: ./output/checkpoints/${exp_name}
+
+# =====================
+# Training Control
+# =====================
+num_gpus_per_node: 8
+max_steps: 500
+save_steps: 50
+logging_steps: 1
+eval_steps: 10
+resume_from_checkpoint: false
+
+# =====================
+# GRPO Algorithm Configuration
+# =====================
+rollout_batch_size: 256           # Number of prompts/trajectories per rollout
+val_batch_size: 256
+sequence_length: 8192             # Max total sequence length
+
+# GRPO specific
+adv_estimator: "grpo"             # Use GRPO advantage estimator
+num_return_sequences_in_group: 8  # Number of samples per prompt for group comparison
+ppo_epochs: 1
+
+# KL & Advantage Settings
+use_kl_loss: true
+kl_loss_coef: 0.001
+init_kl_coef: 0.0
+whiten_advantages: true
+advantage_clip: 0.2
+
+# Clip Settings
+reward_clip: 10
+pg_clip: 0.1
+dual_clip_loss: true
+
+# Loss Aggregation
+loss_agg_mode: "seq-mean-token-mean"
+entropy_loss_coef: 0
+max_grad_norm: 1.0
+
+# =====================
+# Model Configuration
+# =====================
+pretrain: Qwen/Qwen3-8B
+reward_pretrain: Qwen/Qwen3-8B
+
+# =====================
+# Actor Training Configuration (DeepSpeed)
+# =====================
+actor_train:
+  model_args:
+    attn_implementation: fa2        # Flash Attention 2
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: ~
+  training_args:
+    learning_rate: 1.0e-6
+    weight_decay: 0
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 16
+    warmup_steps: 20
+    lr_scheduler_type: cosine
+    num_train_epochs: 50
+  data_args:
+    template: qwen3
+  strategy_args:
+    strategy_name: deepspeed_train   # Use DeepSpeed backend
+    strategy_config: ${deepspeed_zero3}   # ZeRO-2 for 8B model (change to zero3 for larger models)
+  device_mapping: list(range(0,8))
+  infer_batch_size: 2
+
+# =====================
+# Actor Inference Configuration (vLLM)
+# =====================
+actor_infer:
+  model_args:
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: 128           # Single-turn response length
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: 1
+  data_args:
+    template: qwen3
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      gpu_memory_utilization: 0.75
+      block_size: 16
+      load_format: auto
+      max_model_len: 8192
+  device_mapping: list(range(0,8))
+
+# =====================
+# Reference Model Configuration
+# =====================
+reference:
+  model_args:
+    attn_implementation: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: ~
+  data_args:
+    template: qwen3
+  strategy_args:
+    strategy_name: hf_infer
+    strategy_config: ~
+  device_mapping: list(range(0,8))
+  infer_batch_size: 2
+
+# =====================
+# Reward Normalization
+# =====================
+reward_normalization:
+  grouping: traj_group_id   # Group by trajectory group ID for GRPO
+  method: mean_std          # Normalize using mean and std
+
+# =====================
+# Environment Manager Configuration
+# =====================
+train_env_manager:
+  max_env_num_per_worker: 16
+  num_env_groups: 256
+  group_size: 8                   # GRPO: same prompt generates 8 responses
+  tags: [FrozenLake, SimpleSokoban]
+  num_groups_partition: [128, 128]
+
+val_env_manager:
+  max_env_num_per_worker: 32
+  num_env_groups: 256
+  group_size: 1                   # Validation: single response per prompt
+  tags: [FrozenLake, SimpleSokoban, LargerSokoban]
+  num_groups_partition: [86, 85, 85]
+
+# =====================
+# Environment Settings
+# =====================
+max_tokens_per_step: 128
+max_actions_per_traj: 10
+
+custom_envs:
+  SimpleSokoban:
+    ${custom_env.SimpleSokoban}
+  LargerSokoban:
+    ${custom_env.LargerSokoban}
+  SokobanDifferentGridVocab:
+    ${custom_env.SokobanDifferentGridVocab}
+  FrozenLake:
+    ${custom_env.FrozenLake}
+  FrozenLakeThink:
+    ${custom_env.FrozenLakeThink}

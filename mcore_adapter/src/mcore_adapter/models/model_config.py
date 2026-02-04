@@ -390,9 +390,7 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
                 normalized_name = name.replace("-", "_")
                 if not hasattr(self, normalized_name):
                     setattr(self, normalized_name, value)
-        print(f">>>>>>>mindspeed_defaults={mindspeed_defaults}", flush=True)
-        # if not hasattr(self, "moe_zero_memory"):
-        #     self.moe_zero_memory = "disable"
+        logger.debug(f"mindspeed_defaults={mindspeed_defaults}")
 
 @dataclass
 class MLAMcaModelConfig(McaModelConfig, MLATransformerConfig):

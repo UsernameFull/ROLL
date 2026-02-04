@@ -46,7 +46,7 @@ val_batch_size: 64
 num_nodes: 1
 num_gpus_per_node: 4
 
-pretrain: /home/wjq/Qwen3-4B
+pretrain: Qwen/Qwen2.5-3B-Instruct
 
 ipo: false
 beta: 0.1

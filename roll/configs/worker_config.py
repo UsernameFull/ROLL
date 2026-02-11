@@ -192,7 +192,7 @@ class WorkerConfig:
     )
 
     sequence_packing_args: SequencePackingConfig = field(
-        default_factory=SequencePackingConfig,
+        default= SequencePackingConfig(),
         metadata={
             "help": "Sequence packing related arguments "
         }

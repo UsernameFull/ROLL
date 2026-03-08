@@ -32,11 +32,32 @@ try:
     from mcore_adapter.adapters import (
         apply_megatron_lora,
         find_all_embedding_modules,
-        find_all_linear_modules,
+        find_all_linear_modules as _mca_find_all_linear_modules,
         find_all_router_modules,
         set_linear_is_expert,
     )
     from mcore_adapter.models import AutoModel
+
+    def find_all_linear_modules(model):
+        """Wrapper around mcore_adapter's find_all_linear_modules that handles
+        the case where Transformer Engine types (TELinear, etc.) are None
+        (e.g. on Ascend NPU where TE is not available)."""
+        try:
+            return _mca_find_all_linear_modules(model)
+        except TypeError:
+            # TELinear/TEGroupedLinear/TELayerNormColumnParallelLinear may be None
+            # when Transformer Engine is not installed. Fall back to nn.Linear scan.
+            logger.warning(
+                "mcore_adapter find_all_linear_modules failed (likely missing Transformer Engine), "
+                "falling back to nn.Linear scan"
+            )
+            linear_module_names = set()
+            for name, module in model.named_modules():
+                if isinstance(module, nn.Linear):
+                    linear_module_names.add(name.split(".")[-1])
+            linear_module_names.discard("lm_head")
+            return list(linear_module_names)
+
 except Exception as e:
     mca_TrainingArguments = None
 

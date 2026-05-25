@@ -89,9 +89,9 @@ jobs:
       VLLM_USE_V1: "1"
       # The CI vLLM smoke uses TP=1; FlashComm sequence parallelism requires TP>1.
       VLLM_ASCEND_ENABLE_FLASHCOMM: "0"
-      SGL_KERNEL_NPU_REPO: https://github.com/sgl-project/sgl-kernel-npu.git
-      SGL_KERNEL_NPU_BRANCH: main
-      SGL_KERNEL_NPU_CACHE_KEY: main
+      SGLANG_KERNEL_NPU_REPO: https://github.com/sgl-project/sgl-kernel-npu.git
+      SGLANG_KERNEL_NPU_BRANCH: main
+      SGLANG_KERNEL_NPU_CACHE_KEY: main
       SGLANG_REPO: https://github.com/sgl-project/sglang.git
       SGLANG_BRANCH: ifmn/eagle-dp-attn
       SGLANG_CACHE_KEY: ifmn-eagle-dp-attn
@@ -106,9 +106,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-npu-pip-${{ env.SGL_KERNEL_NPU_CACHE_KEY }}-${{ env.SGLANG_CACHE_KEY }}-${{ hashFiles('requirements_common.txt', 'mcore_adapter/pyproject.toml', 'mcore_adapter/requirements.txt', 'setup.py', 'pyproject.toml', '.github/workflows/ci-npu-test.yml') }}
+          key: ${{ runner.os }}-npu-pip-${{ env.SGLANG_KERNEL_NPU_CACHE_KEY }}-${{ env.SGLANG_CACHE_KEY }}-${{ hashFiles('requirements_common.txt', 'mcore_adapter/pyproject.toml', 'mcore_adapter/requirements.txt', 'setup.py', 'pyproject.toml', '.github/workflows/ci-npu-test.yml') }}
           restore-keys: |
-            ${{ runner.os }}-npu-pip-${{ env.SGL_KERNEL_NPU_CACHE_KEY }}-${{ env.SGLANG_CACHE_KEY }}-
+            ${{ runner.os }}-npu-pip-${{ env.SGLANG_KERNEL_NPU_CACHE_KEY }}-${{ env.SGLANG_CACHE_KEY }}-
             ${{ runner.os }}-npu-pip-${{ env.SGLANG_CACHE_KEY }}-
             ${{ runner.os }}-npu-pip-
 
@@ -186,10 +186,10 @@ jobs:
         shell: bash
         run: |
           set -eo pipefail
-          export SGL_KERNEL_NPU_SRC="/tmp/sgl-kernel-npu"
-          rm -rf "${SGL_KERNEL_NPU_SRC}"
-          git clone --depth 1 --branch "${SGL_KERNEL_NPU_BRANCH}" "${SGL_KERNEL_NPU_REPO}" "${SGL_KERNEL_NPU_SRC}"
-          cd "${SGL_KERNEL_NPU_SRC}"
+          export SGLANG_KERNEL_NPU_SRC="/tmp/sgl-kernel-npu"
+          rm -rf "${SGLANG_KERNEL_NPU_SRC}"
+          git clone --depth 1 --branch "${SGLANG_KERNEL_NPU_BRANCH}" "${SGLANG_KERNEL_NPU_REPO}" "${SGLANG_KERNEL_NPU_SRC}"
+          cd "${SGLANG_KERNEL_NPU_SRC}"
           python3 -m pip install pybind11 wheel
           bash build.sh -a kernels
           python3 -m pip install output/sgl_kernel_npu*.whl

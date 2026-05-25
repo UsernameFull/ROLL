@@ -71,7 +71,7 @@ async def _run_npu_sglang_abort_smoke():
 
         model = sglang_patch.engine.engine_module.Engine(
             model_path=model_path,
-            enable_memory_saver=True,
+            enable_memory_saver=False,
             skip_tokenizer_init=False,
             dtype="bfloat16",
             tp_size=1,

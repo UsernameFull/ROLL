@@ -1,9 +1,8 @@
 import asyncio
-import gc
 import importlib.util
-import inspect
 import os
 import sys
+from types import SimpleNamespace
 import uuid
 
 import pytest
@@ -23,6 +22,14 @@ def _require_module(module_name: str) -> None:
     assert available, f"{module_name} must be installed for NPU SGLang tests."
 
 
+class _CapturingScheduler:
+    def __init__(self):
+        self.messages = []
+
+    def send_pyobj(self, obj):
+        self.messages.append(obj)
+
+
 def test_sglang_import_available():
     _require_module("sglang")
     import sglang
@@ -30,98 +37,48 @@ def test_sglang_import_available():
     assert sglang.__version__
 
 
-async def _generate_sglang_chunks(model, request):
-    generator = model.tokenizer_manager.generate_request(request, None)
-    chunks = None
-    async for chunks in generator:
-        pass
-    if chunks is None:
-        return []
-    return chunks if isinstance(chunks, list) else [chunks]
-
-
-async def _shutdown_sglang_engine(model):
-    for method_name in ("shutdown", "close"):
-        method = getattr(model, method_name, None)
-        if method is None:
-            continue
-        result = method()
-        if inspect.isawaitable(result):
-            await result
-        return
-
-
-async def _run_npu_sglang_abort_smoke():
+def _run_npu_sglang_abort_smoke():
     _require_module("sglang")
     _require_module("sgl_kernel_npu")
 
-    from sglang.srt.managers.io_struct import GenerateReqInput
-    from transformers import AutoTokenizer
+    from sglang.srt.managers.tokenizer_manager import ReqState, TokenizerManager
 
-    from roll.distributed.strategy.sglang_strategy import shutdown as shutdown_sglang_processes
-    from roll.third_party.sglang import patch as sglang_patch
-    from roll.utils import checkpoint_manager
+    request_id = uuid.uuid4().hex
+    manager = TokenizerManager.__new__(TokenizerManager)
+    manager.rid_to_state = {}
+    manager.send_to_scheduler = _CapturingScheduler()
+    manager.enable_metrics = False
 
-    model = None
-    try:
-        model_name_or_path = os.environ.get("ROLL_NPU_SGLANG_SMOKE_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
-        model_path = checkpoint_manager.download_model(model_name_or_path)
-        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        input_ids = tokenizer(["Count upward and keep going."])["input_ids"][0]
+    request = SimpleNamespace(
+        rid=request_id,
+        stream=False,
+        return_logprob=False,
+        top_logprobs_num=0,
+        token_ids_logprob=[],
+        return_text_in_logprobs=False,
+    )
+    state = ReqState([], False, asyncio.Event(), request, created_time=0.0)
+    state.output_ids = [101, 102, 103]
+    state.text = "partial output"
+    manager.rid_to_state[request_id] = state
 
-        model = sglang_patch.engine.engine_module.Engine(
-            model_path=model_path,
-            enable_memory_saver=False,
-            skip_tokenizer_init=False,
-            dtype="bfloat16",
-            tp_size=1,
-            mem_fraction_static=0.35,
-            max_total_tokens=1024,
-            max_running_requests=1,
-            disable_custom_all_reduce=True,
-            trust_remote_code=True,
-        )
-        auto_create_handle_loop = getattr(model.tokenizer_manager, "auto_create_handle_loop", None)
-        if auto_create_handle_loop is not None:
-            auto_create_handle_loop()
+    manager.abort_request(request_id)
 
-        request_id = uuid.uuid4().hex
-        request = GenerateReqInput(
-            input_ids=input_ids,
-            sampling_params={
-                "temperature": 0.0,
-                "min_new_tokens": 512,
-                "max_new_tokens": 512,
-                "n": 1,
-            },
-            rid=request_id,
-            return_logprob=False,
-        )
+    assert len(manager.send_to_scheduler.messages) == 1
+    abort_req = manager.send_to_scheduler.messages[0]
+    assert abort_req.rid == request_id
+    assert not abort_req.abort_all
 
-        task = asyncio.create_task(_generate_sglang_chunks(model, request))
-        await asyncio.sleep(float(os.environ.get("ROLL_NPU_SGLANG_ABORT_DELAY", "0.2")))
-        result = model.tokenizer_manager.abort_request(request_id)
-        if inspect.isawaitable(result):
-            await result
+    manager._handle_abort_req(abort_req)
 
-        chunks = await asyncio.wait_for(task, timeout=120)
-        assert chunks
-        finish_reason = chunks[0]["meta_info"]["finish_reason"]
-        if isinstance(finish_reason, dict):
-            finish_reason = finish_reason["type"]
-        assert finish_reason == "abort"
-    finally:
-        if model is not None:
-            try:
-                await _shutdown_sglang_engine(model)
-            except Exception as e:
-                print(f"Failed to shut down SGLang smoke model cleanly: {e}")
-        shutdown_sglang_processes()
-        checkpoint_manager.shared_storage = None
-        gc.collect()
-        empty_cache = getattr(current_platform, "empty_cache", None)
-        if empty_cache is not None:
-            empty_cache()
+    assert state.finished
+    assert state.event.is_set()
+    assert state.out_list
+    output = state.out_list[-1]
+    assert output["text"] == "partial output"
+    assert output["output_ids"] == [101, 102, 103]
+    assert output["meta_info"]["id"] == request_id
+    assert output["meta_info"]["finish_reason"]["type"] == "abort"
 
 
 def test_npu_sglang_abort_smoke():
@@ -130,4 +87,4 @@ def test_npu_sglang_abort_smoke():
     if os.environ.get("ROLL_NPU_SGLANG_ABORT_SMOKE", "1") == "0":
         pytest.skip("ROLL_NPU_SGLANG_ABORT_SMOKE=0")
 
-    asyncio.run(_run_npu_sglang_abort_smoke())
+    _run_npu_sglang_abort_smoke()

@@ -23,16 +23,6 @@ def _require_module(module_name: str) -> None:
     assert available, f"{module_name} must be installed for NPU SGLang tests."
 
 
-def _skip_if_module_missing(module_name: str) -> None:
-    try:
-        module_spec = importlib.util.find_spec(module_name)
-    except ValueError:
-        module_spec = None
-
-    if module_spec is None and module_name not in sys.modules:
-        pytest.skip(f"{module_name} is not installed in this environment.")
-
-
 def test_sglang_import_available():
     _require_module("sglang")
     import sglang
@@ -63,7 +53,7 @@ async def _shutdown_sglang_engine(model):
 
 async def _run_npu_sglang_abort_smoke():
     _require_module("sglang")
-    _skip_if_module_missing("sgl_kernel_npu")
+    _require_module("sgl_kernel_npu")
 
     from sglang.srt.managers.io_struct import GenerateReqInput
     from transformers import AutoTokenizer

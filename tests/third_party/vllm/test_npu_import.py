@@ -73,10 +73,8 @@ async def _shutdown_async_llm(model):
         return
 
 
-async def _run_npu_vllm_generate_smoke():
+async def _run_with_npu_vllm_smoke_model(callback, **model_kwargs):
     import ray
-    from vllm import SamplingParams
-    from vllm.utils import random_uuid
 
     from roll.distributed.scheduler.initialize import init
     from roll.distributed.scheduler.resource_manager import ResourceManager
@@ -94,9 +92,7 @@ async def _run_npu_vllm_generate_smoke():
         resource_manager = ResourceManager(num_gpus_per_node=1, num_nodes=1)
         placement_groups = resource_manager.allocate_placement_group(world_size=1, device_mapping=[0])
 
-        model = await create_async_llm(
-            resource_placement_groups=placement_groups[0],
-            model=model_path,
+        kwargs = dict(
             dtype="bfloat16",
             gpu_memory_utilization=0.35,
             max_model_len=512,
@@ -108,22 +104,15 @@ async def _run_npu_vllm_generate_smoke():
             enforce_eager=True,
             trust_remote_code=True,
         )
+        kwargs.update(model_kwargs)
 
-        sampling_params = SamplingParams(temperature=0.0, max_tokens=4, min_tokens=1)
-        result_generator = model.generate(
-            prompt="Write one short greeting.",
-            sampling_params=sampling_params,
-            request_id=random_uuid(),
+        model = await create_async_llm(
+            resource_placement_groups=placement_groups[0],
+            model=model_path,
+            **kwargs,
         )
 
-        output = None
-        async for request_output in result_generator:
-            output = request_output
-
-        assert output is not None
-        assert output.finished
-        assert len(output.outputs) == 1
-        assert output.outputs[0].token_ids
+        return await callback(model)
     finally:
         if model is not None:
             try:
@@ -141,6 +130,73 @@ async def _run_npu_vllm_generate_smoke():
             empty_cache()
 
 
+async def _run_npu_vllm_generate_smoke():
+    from vllm import SamplingParams
+    from vllm.utils import random_uuid
+
+    async def generate(model):
+        sampling_params = SamplingParams(temperature=0.0, max_tokens=4, min_tokens=1)
+        result_generator = model.generate(
+            prompt="Write one short greeting.",
+            sampling_params=sampling_params,
+            request_id=random_uuid(),
+        )
+
+        output = None
+        async for request_output in result_generator:
+            output = request_output
+
+        assert output is not None
+        assert output.finished
+        assert len(output.outputs) == 1
+        assert output.outputs[0].token_ids
+
+    await _run_with_npu_vllm_smoke_model(generate)
+
+
+async def _run_npu_vllm_abort_smoke():
+    from vllm import SamplingParams
+    from vllm.sampling_params import RequestOutputKind
+    from vllm.utils import random_uuid
+
+    async def abort(model):
+        request_id = random_uuid()
+        sampling_params = SamplingParams(
+            temperature=0.0,
+            min_tokens=512,
+            max_tokens=512,
+            output_kind=RequestOutputKind.FINAL_ONLY,
+        )
+
+        async def collect_output():
+            output = None
+            async for request_output in model.generate(
+                prompt="Count upward and keep going.",
+                sampling_params=sampling_params,
+                request_id=request_id,
+            ):
+                output = request_output
+            return output
+
+        task = asyncio.create_task(collect_output())
+        await asyncio.sleep(float(os.environ.get("ROLL_NPU_VLLM_ABORT_DELAY", "0.2")))
+        result = model.abort(request_id)
+        if inspect.isawaitable(result):
+            await result
+
+        output = await asyncio.wait_for(task, timeout=120)
+        assert output is not None
+        assert output.finished
+        assert output.outputs
+        assert all(completion.finish_reason == "abort" for completion in output.outputs)
+
+    await _run_with_npu_vllm_smoke_model(
+        abort,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+    )
+
+
 def test_npu_vllm_generate_smoke():
     if not current_platform.is_npu():
         pytest.skip("NPU vLLM generate smoke only applies on Ascend NPU.")
@@ -148,3 +204,12 @@ def test_npu_vllm_generate_smoke():
         pytest.skip("ROLL_NPU_VLLM_GENERATE_SMOKE=0")
 
     asyncio.run(_run_npu_vllm_generate_smoke())
+
+
+def test_npu_vllm_abort_smoke():
+    if not current_platform.is_npu():
+        pytest.skip("NPU vLLM abort smoke only applies on Ascend NPU.")
+    if os.environ.get("ROLL_NPU_VLLM_ABORT_SMOKE", "1") == "0":
+        pytest.skip("ROLL_NPU_VLLM_ABORT_SMOKE=0")
+
+    asyncio.run(_run_npu_vllm_abort_smoke())

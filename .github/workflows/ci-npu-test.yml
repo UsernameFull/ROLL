@@ -1,0 +1,275 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, npu_ci]
+    paths-ignore:
+      - "docs_roll/**"
+      - "**/*.md"
+      - ".github/workflows/deploy.yml"
+      - ".github/workflows/daily-stats.yml"
+  pull_request:
+    branches: [main, npu_ci]
+    paths-ignore:
+      - "docs_roll/**"
+      - "**/*.md"
+      - ".github/workflows/deploy.yml"
+      - ".github/workflows/daily-stats.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-test:
+    name: Unit Tests (CPU)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements_common.txt
+            mcore_adapter/pyproject.toml
+            mcore_adapter/requirements.txt
+            setup.py
+            pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          # Install PyTorch CPU-only to keep CI lightweight
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+          # Install core test dependencies (subset of requirements_common.txt)
+          pip install pytest pytest-timeout numpy tensordict pydantic dacite \
+            more_itertools hydra-core omegaconf peft==0.12.0 datasets==3.1.0 \
+            trl==0.9.6 transformers ray[default] sympy deprecated codetiming pybase64 imageio
+          # Install mcore_adapter and roll itself
+          pip install -e ./mcore_adapter
+          pip install -e .
+
+      - name: Run CPU-compatible unit tests
+        run: |
+          pytest tests/utils/test_action_parser.py \
+                 tests/utils/test_functionals.py \
+                 tests/utils/test_dynamic_batching.py \
+                 tests/utils/test_sequence_packing.py \
+                 tests/utils/test_taskgroups.py \
+                 tests/utils/test_cp_rmpad_ulysses_utils.py \
+                 tests/datasets/test_collator.py \
+                 tests/datasets/test_sampler.py \
+                 tests/agentic/test_segment_masked_mean.py \
+                 tests/test_ref_worker_type_consistency.py \
+                 tests/distributed/scheduler/test_protocol.py \
+                 tests/distributed/scheduler/test_protocol_padding.py \
+                 tests/distributed/scheduler/test_decorator.py \
+                 tests/distributed/scheduler/test_resource_manager.py \
+                 -v --timeout=300 -x
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+  npu-test:
+    name: NPU Integration Tests
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: linux-aarch64-a3-8
+    timeout-minutes: 120
+    container:
+      # Pre-built NPU docker image (built from docker/Dockerfile.A3) with all deps pre-installed
+      image: swr.cn-north-4.myhuaweicloud.com/ascend-cicd/roll:main-a3
+    env:
+      HF_ENDPOINT: https://hf-mirror.com
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      TASK_QUEUE_ENABLE: "2"
+      VLLM_USE_V1: "1"
+      # The CI vLLM smoke uses TP=1; FlashComm sequence parallelism requires TP>1.
+      VLLM_ASCEND_ENABLE_FLASHCOMM: "0"
+      SGLANG_REPO: https://github.com/sgl-project/sglang.git
+      SGLANG_BRANCH: ifmn/eagle-dp-attn
+      SGLANG_CACHE_KEY: ifmn-eagle-dp-attn
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Cache NPU pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-npu-pip-${{ env.SGLANG_CACHE_KEY }}-${{ hashFiles('requirements_common.txt', 'mcore_adapter/pyproject.toml', 'mcore_adapter/requirements.txt', 'setup.py', 'pyproject.toml', '.github/workflows/ci-npu-test.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-npu-pip-${{ env.SGLANG_CACHE_KEY }}-
+            ${{ runner.os }}-npu-pip-
+
+      - name: Configure Ascend runtime
+        shell: bash
+        run: |
+          set -eo pipefail
+          if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then
+            source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          fi
+          if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then
+            source /usr/local/Ascend/nnal/atb/set_env.sh
+          fi
+
+          export ASCEND_HOME_PATH="${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}"
+          export ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-${ASCEND_HOME_PATH}}"
+          export ASCEND_OPP_PATH="${ASCEND_OPP_PATH:-${ASCEND_HOME_PATH}/opp}"
+          export ASCEND_AICPU_PATH="${ASCEND_AICPU_PATH:-${ASCEND_HOME_PATH}}"
+          export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/ascend-toolkit/latest/runtime/lib64:/usr/local/Ascend/ascend-toolkit/latest/runtime/lib64/stub:/usr/local/Ascend/ascend-toolkit/latest/tools/hccl/lib64:/usr/local/Ascend/ascend-toolkit/latest/hccl/lib64:${LD_LIBRARY_PATH:-}"
+
+          cann_python_paths=()
+          for path in \
+            "${ASCEND_HOME_PATH}/python/site-packages" \
+            "${ASCEND_HOME_PATH}/opp/built-in/op_impl/ai_core/tbe"; do
+            if [ -d "$path" ]; then
+              cann_python_paths+=("$path")
+            fi
+          done
+          if [ ${#cann_python_paths[@]} -gt 0 ]; then
+            export PYTHONPATH="$(IFS=:; echo "${cann_python_paths[*]}"):${PYTHONPATH:-}"
+          fi
+
+          echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH}" >> "$GITHUB_ENV"
+          echo "ASCEND_TOOLKIT_HOME=${ASCEND_TOOLKIT_HOME}" >> "$GITHUB_ENV"
+          echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH}" >> "$GITHUB_ENV"
+          echo "ASCEND_AICPU_PATH=${ASCEND_AICPU_PATH}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "PYTHONPATH=${PYTHONPATH:-}" >> "$GITHUB_ENV"
+          echo "${ASCEND_HOME_PATH}/bin" >> "$GITHUB_PATH"
+          echo "${ASCEND_HOME_PATH}/compiler/ccec_compiler/bin" >> "$GITHUB_PATH"
+
+      - name: Show environment info
+        run: |
+          echo "=== Python ==="
+          python3 --version
+          python3 -m pip --version
+          echo "=== PyTorch ==="
+          python3 -c "import torch; print(f'torch={torch.__version__}')"
+          echo "=== NPU ==="
+          python3 -c "
+          import torch
+          import torch_npu
+          import importlib.util
+
+          print(f'torch_npu={torch_npu.__version__}')
+          tbe_spec = importlib.util.find_spec('tbe')
+          print(f'tbe_module={tbe_spec is not None}')
+          if tbe_spec is None:
+              raise RuntimeError('CANN tbe Python module is not visible in PYTHONPATH')
+          for module_name in ('decorator', 'attrs', 'psutil', 'scipy', 'cloudpickle', 'tornado', 'ml_dtypes'):
+              module_spec = importlib.util.find_spec(module_name)
+              print(f'{module_name}_module={module_spec is not None}')
+          if not torch.npu.is_available():
+              raise RuntimeError('torch.npu.is_available() is False')
+          print(f'npu_device_count={torch.npu.device_count()}')
+          "
+          echo "=== Ascend ==="
+          npu-smi info
+
+      - name: Install pytest dependencies
+        run: |
+          pip install pytest-timeout
+
+      - name: Install SGLang from source
+        shell: bash
+        run: |
+          set -eo pipefail
+          export SGLANG_SRC="${RUNNER_TEMP:-/tmp}/sglang"
+          rm -rf "${SGLANG_SRC}"
+          git clone --depth 1 --branch "${SGLANG_BRANCH}" "${SGLANG_REPO}" "${SGLANG_SRC}"
+          python3 - <<'PY' > "${SGLANG_SRC}/ci-requirements.txt"
+          import importlib.metadata
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          skip_packages = {
+              "cuda-python",
+              "flashinfer-cubin",
+              "flashinfer-python",
+              "nvidia-cutlass-dsl",
+              "nvidia-ml-py",
+              "sgl-kernel",
+              "torch",
+              "torch-memory-saver",
+              "torchaudio",
+              "torchao",
+              "torchcodec",
+              "torchvision",
+              "transformers",
+          }
+
+          pyproject = Path(os.environ["SGLANG_SRC"]) / "python" / "pyproject.toml"
+          dependencies = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
+          for dependency in dependencies:
+              package_name = re.split(r"[\[<>=!~; ]", dependency, maxsplit=1)[0]
+              package_name = package_name.replace("_", "-").lower()
+              if package_name in skip_packages:
+                  continue
+              try:
+                  importlib.metadata.version(package_name)
+              except importlib.metadata.PackageNotFoundError:
+                  print(dependency)
+          PY
+          echo "Missing SGLang dependencies for CI:"
+          cat "${SGLANG_SRC}/ci-requirements.txt"
+          python3 -m pip install -r "${SGLANG_SRC}/ci-requirements.txt"
+          python3 -m pip install --no-deps -e "${SGLANG_SRC}/python"
+          python3 - <<'PY'
+          import importlib.metadata
+
+          print(f"sglang={importlib.metadata.version('sglang')}")
+          PY
+
+      - name: Install ROLL
+        run: |
+          pip install -e ./mcore_adapter
+          pip install -e .
+
+      - name: Show vLLM Ascend info
+        run: |
+          python3 - <<'PY'
+          import importlib.metadata
+
+          import vllm
+          import vllm_ascend
+          from roll.platforms import current_platform
+
+          for package_name in ("transformers", "deepspeed", "triton-ascend"):
+              try:
+                  package_version = importlib.metadata.version(package_name)
+              except importlib.metadata.PackageNotFoundError:
+                  package_version = "not installed"
+              print(f"{package_name}={package_version}")
+
+          print(f"vllm={vllm.__version__}")
+          print(f"platform={current_platform.device_type}")
+          PY
+
+      - name: Run remaining NPU-compatible unit tests
+        run: |
+          export PYTHONPATH="${GITHUB_WORKSPACE}:${PYTHONPATH:-}"
+          python3 -m pytest tests/third_party/sglang \
+                            tests/third_party/vllm \
+                            tests/agentic \
+                            tests/datasets \
+                            tests/distributed \
+                            tests/models \
+                            tests/pipeline \
+                            tests/third_party/deepspeed \
+                            tests/utils/ \
+                            tests/test_ref_worker_type_consistency.py \
+                            --ignore=tests/models/cuda_mem \
+                            -v --timeout=600 -x
+        env:
+          ROLL_NPU_CI: "1"
+          DS_UNITTEST_TIMEOUT: "600"

@@ -1,4 +1,9 @@
+import os
 import pytest
+
+if os.getenv("ROLL_RUN_EXTERNAL_AGENTIC_TESTS") != "1":
+    pytest.skip("requires access to the external Sokoban MCP service", allow_module_level=True)
+
 import json
 from roll.pipeline.agentic.env.mcp.mcp_client import MCPClient
 

@@ -1,3 +1,9 @@
+import os
+import pytest
+
+if os.getenv("ROLL_RUN_AGENTIC_SANDBOX_TESTS") != "1":
+    pytest.skip("requires an interactive cloud sandbox service", allow_module_level=True)
+
 from roll.pipeline.agentic.env.sandbox import SokobanSandboxEnv
 import traceback
 

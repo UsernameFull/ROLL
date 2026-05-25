@@ -14,3 +14,12 @@ line-length = 119
 [tool.ruff.isort]
 lines-after-imports = 2
 known-first-party = ["roll"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: mark test as requiring GPU (CUDA or NPU)",
+    "distributed: mark test as requiring distributed setup (multi-process)",
+    "slow: mark test as slow running",
+    "npu: mark test as requiring Ascend NPU",
+]

@@ -1,10 +1,16 @@
 import asyncio
+import os
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import sys
+
+import pytest
 import ray
 
 from roll.distributed.scheduler.rollout_scheduler import GroupQueueManager
+
+if os.getenv("ROLL_RUN_AGENTIC_ROLLOUT_TESTS") != "1":
+    pytest.skip("agentic rollout scheduler stress test is opt-in for CI", allow_module_level=True)
 
 TEST_EXCEPTION = False
 

@@ -1,10 +1,14 @@
 import gc
 import json
 
+import pytest
 import ray
 import torch
 
 from roll.distributed.scheduler.initialize import init
+
+
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 
 
 def log_gpu_memory_usage(head: str):

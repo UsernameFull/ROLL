@@ -26,6 +26,14 @@ def initialize_ray_cluster(ray_address: str | None = None):
     ray.init(address=ray_address)
 
 
+def _ray_remote_resource_options() -> dict:
+    if roll_current_platform.ray_device_key == "GPU":
+        return {"num_gpus": 0.01}
+    if roll_current_platform.ray_device_key == "NPU":
+        return {"num_gpus": 0, "resources": {roll_current_platform.ray_device_key: 0.01}}
+    raise RuntimeError(f"Unsupported vLLM Ray device resource: {roll_current_platform.ray_device_key}")
+
+
 class CustomRayDistributedExecutor(RayDistributedExecutor):
     def _init_executor(self) -> None:
         self.forward_dag: ray.dag.CompiledDAG | None = None
@@ -86,17 +94,16 @@ class CustomRayDistributedExecutor(RayDistributedExecutor):
             env_vars.update(roll_current_platform.get_custom_env_vars())
             env_vars.update(roll_current_platform.get_vllm_run_time_env_vars(gpu_rank))
             runtime_env = RuntimeEnv(env_vars=env_vars)
-            assert current_platform.ray_device_key == "GPU" or "NPU"
             # NV+AMD GPUs, and Intel XPUs
             worker = ray.remote(
                 num_cpus=0,
-                num_gpus={current_platform.ray_device_key: 0.01},
+                **_ray_remote_resource_options(),
                 runtime_env=runtime_env,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,
                 ),
                 **ray_remote_kwargs,
-            )(RayWorkerWrapper).remote(rpc_rank=rank)
+            )(RayWorkerWrapper).remote(vllm_config=self.vllm_config, rpc_rank=rank)
             worker_metadata.append(RayWorkerMetaData(worker=worker, created_rank=rank))
 
         worker_ips = ray.get(
@@ -167,7 +174,9 @@ class CustomRayDistributedExecutor(RayDistributedExecutor):
         # Environment variables to copy from driver to workers
         env_vars_to_copy = get_env_vars_to_copy(
             exclude_vars=self.WORKER_SPECIFIC_ENV_VARS,
-            additional_vars=set(current_platform.additional_env_vars),
+            additional_vars=set(current_platform.additional_env_vars).union(
+                getattr(self, "ADDITIONAL_ENV_VARS", set())
+            ),
             destination="workers",
         )
 

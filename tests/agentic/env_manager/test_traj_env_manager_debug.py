@@ -8,6 +8,12 @@ pip install -r requirements_em_local_debug.txt
 
 python tests/agentic/env_manager/test_traj_env_manager.py
 """
+import os
+import pytest
+
+if os.getenv("ROLL_RUN_AGENTIC_ENV_MANAGER_DEBUG_TESTS") != "1":
+    pytest.skip("agentic env-manager debug tests require model assets and are opt-in", allow_module_level=True)
+
 import threading
 
 import ray

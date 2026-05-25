@@ -43,6 +43,21 @@ class _PlatformStub:
     def apply_ulysses_patch(self):
         return None
 
+    def empty_cache(self):
+        if self.device_type == "cuda":
+            torch.cuda.empty_cache()
+
+    def get_rng_state(self):
+        if self.device_type == "cuda":
+            return torch.cuda.get_rng_state()
+        return torch.get_rng_state()
+
+    def set_rng_state(self, state):
+        if self.device_type == "cuda":
+            torch.cuda.set_rng_state(state)
+        else:
+            torch.set_rng_state(state)
+
 
 class DummyTrainingArgs:
     def __init__(self):
@@ -80,6 +95,7 @@ def make_worker(
         use_remove_padding=use_remove_padding,
         checkpoint_config=None,
         offload_nccl=False,
+        apply_loss_scale=False,
     )
     worker = SimpleNamespace(
         worker_config=worker_config,
@@ -611,6 +627,8 @@ def test_forward_step_uses_cp_slice(strategy_factory):
     logits = torch.zeros(1, 2, 3)
     strategy.model = DummyForwardModel(logits=logits)
     strategy.param_dtype = torch.float32
+    strategy._get_batch_num_tokens = lambda batch: {}
+    strategy._get_global_valid_samples = lambda batch: {}
 
     seq_len = 4
     batch = TensorDict(
@@ -622,7 +640,10 @@ def test_forward_step_uses_cp_slice(strategy_factory):
         },
         batch_size=[1],
     )
-    data = DataProto(batch=batch, meta_info={"micro_batch_size": 1})
+    data = DataProto(
+        batch=batch,
+        meta_info={"micro_batch_size": 1, "loss_mask_keys": []},
+    )
 
     def dummy_forward_func(local_data, output_tensor):
         zeros = torch.zeros_like(local_data.batch["input_ids"]).float()
@@ -699,14 +720,13 @@ def test_offload_states_moves_to_cpu_and_clears_cuda_cache(
         non_blocking=True,
     )
 
-    assert strategy.model.cpu_called
-    assert isinstance(captured["device"], torch.device)
-    assert captured["device"].type == "cpu"
-    assert captured["non_blocking"] is True
+    assert strategy.model.to_calls == [("cpu", True)]
+    assert captured == {}
     assert cache_cleared["flag"] is True
 
 
-def test_rng_state_roundtrip(monkeypatch):
+def test_rng_state_roundtrip(monkeypatch, platform_stub):
+    platform_stub.device_type = "cuda"
     cpu_state = torch.arange(4, dtype=torch.uint8)
     cuda_state = torch.arange(5, dtype=torch.uint8)
     numpy_state = ("MT19937", np.arange(624, dtype=np.uint32), 0, 0, 0.0)
@@ -746,7 +766,7 @@ def test_rng_state_roundtrip(monkeypatch):
 
     assert torch.equal(rng_state["cpu"], cpu_state)
     assert torch.equal(captured["cpu"], cpu_state)
-    assert torch.equal(rng_state["cuda"], cuda_state)
+    assert torch.equal(rng_state["device"], cuda_state)
     assert torch.equal(captured["cuda"], cuda_state)
     assert rng_state["numpy"] == numpy_state
     assert captured["numpy"] == numpy_state

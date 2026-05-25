@@ -7,6 +7,14 @@ from roll.datasets.loader import get_dataset
 from roll.models.model_providers import default_tokenizer_provider
 
 
+def get_model_input_device(model):
+    if hasattr(model, "get_input_embeddings"):
+        input_embeddings = model.get_input_embeddings()
+        if input_embeddings is not None:
+            return input_embeddings.weight.device
+    return next(model.parameters()).device
+
+
 def get_mock_dataloader(model_args: ModelArguments, data_args: DataArguments, batch_size: int = 4):
 
     tokenizer = default_tokenizer_provider(model_args=model_args)
@@ -14,6 +22,9 @@ def get_mock_dataloader(model_args: ModelArguments, data_args: DataArguments, ba
     dataset = get_dataset(
         tokenizer=tokenizer,
         data_args=data_args,
+    )
+    dataset = dataset.remove_columns(
+        [col for col in dataset.column_names if col not in ("input_ids", "attention_mask")]
     )
     collate_fn = DataCollatorWithPadding(tokenizer=tokenizer)
     sampler = DistributedSampler(

@@ -1,35 +1,20 @@
-from roll.pipeline.agentic.env import FrozenLakeEnvConfig, FrozenLakeEnv
-from roll.pipeline.agentic.utils import dump_frames_as_gif
+from roll.pipeline.agentic.env.frozen_lake import FrozenLakeEnv
 
 
-def test_frozen_lake():
-    config = FrozenLakeEnvConfig(size=4, p=0.8, is_slippery=False, map_seed=42)
-    env = FrozenLakeEnv(config)
-    frames = []
-    print(env.reset(seed=42))
-    while True:
-        keyboard = input("Enter action: ")
-        if keyboard.lower() == "q":
-            break
-        try:
-            action = int(keyboard)
-        except Exception as e:
-            print("Invalid action, please enter a number")
-            continue
-        if action not in env.ACTION_LOOKUP:
-            print(f"Invalid action {action}, please enter a number between 1 and 4")
-            continue
-        obs, reward, done, info = env.step(action)
-        print()
-        print(obs, reward, done, info)
-        if action in env.ACTION_LOOKUP:
-            frames.append(env.render(mode="rgb_array"))
-        if done:
-            break
+def test_frozen_lake_rejects_invalid_action_without_changing_state():
+    env = FrozenLakeEnv(size=4, p=1.0, is_slippery=False, map_seed=42, format_penalty=-0.2)
+    try:
+        obs, info = env.reset(seed=42)
 
-    # save the image
-    dump_frames_as_gif(filename="./frozen_lake_result.gif", frames=frames)
+        next_obs, reward, terminated, truncated, step_info = env.step("not tagged")
 
-
-if __name__ == "__main__":
-    test_frozen_lake()
+        assert "P" in obs
+        assert "env_instruction" in info
+        assert next_obs == obs
+        assert reward == -0.2
+        assert terminated is False
+        assert truncated is False
+        assert step_info["metrics"]["action_is_valid"] is False
+        assert step_info["metrics"]["action_is_effective"] is False
+    finally:
+        env.close()

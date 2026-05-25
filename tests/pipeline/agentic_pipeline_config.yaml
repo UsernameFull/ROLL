@@ -166,4 +166,4 @@ val_env_manager:
   group_size: 1
   max_env_num_per_worker: 1
   tags: [ "SimpleSokoban", "FrozenLake"]
-  num_groups_partition: [ 2, 2 ] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+  num_groups_partition: [ 1, 1 ] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation

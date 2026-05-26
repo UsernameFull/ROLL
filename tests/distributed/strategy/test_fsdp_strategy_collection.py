@@ -111,13 +111,14 @@ def _set_test_device_for_rank(rank: int) -> torch.device:
 
 
 def _mixed_precision_policy_for_current_platform():
-    if current_platform.is_cuda():
-        return MixedPrecisionPolicy(
-            param_dtype=torch.float16,
-            reduce_dtype=torch.float32,
-            cast_forward_inputs=True,
-        )
-    return None
+    if current_platform.device_type == "cpu":
+        return None
+    param_dtype = torch.float16 if current_platform.device_type == "cuda" else torch.bfloat16
+    return MixedPrecisionPolicy(
+        param_dtype=param_dtype,
+        reduce_dtype=torch.float32,
+        cast_forward_inputs=True,
+    )
 
 
 def _cpu_offload_policy_for_current_platform():

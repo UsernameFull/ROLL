@@ -17,18 +17,19 @@ from roll.utils.logging import get_logger
 
 
 logger = get_logger()
+vllm_version = Version(vllm.__version__)
 
-if Version("0.8.4") == Version(vllm.__version__):
+if Version("0.8.4") == vllm_version:
     import roll.third_party.vllm.vllm_0_8_4 # apply patch
     ray_executor_class_v0 = safe_import_class("roll.third_party.vllm.vllm_0_8_4.ray_distributed_executor.CustomRayDistributedExecutor")
     ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_8_4.v1.ray_distributed_executor.CustomRayDistributedExecutor")
-elif Version("0.10.2") == Version(vllm.__version__):
+elif Version("0.10.2") == vllm_version:
     ray_executor_class_v0 = safe_import_class("roll.third_party.vllm.vllm_0_10_2.ray_distributed_executor.CustomRayDistributedExecutor")
     ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_10_2.v1.ray_distributed_executor.CustomRayDistributedExecutor")
-elif Version("0.11.0") == Version(vllm.__version__) or Version("0.11.1rc1") == Version(vllm.__version__) or Version("0.11.1rc2.dev0+gc3a722fcb.d20251021") == Version(vllm.__version__):
+elif Version("0.11.0") == vllm_version or Version("0.11.1rc1") == vllm_version or Version("0.11.1rc2.dev0+gc3a722fcb.d20251021") == vllm_version:
     ray_executor_class_v0 = safe_import_class("roll.third_party.vllm.vllm_0_11_0.ray_distributed_executor.CustomRayDistributedExecutor")
     ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_11_0.v1.ray_distributed_executor.CustomRayDistributedExecutor")
-elif Version("0.12.0") == Version(vllm.__version__):
+elif Version("0.12.0") == vllm_version:
     ray_executor_class_v0 = None  # V0 deprecated
     ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_12_0.ray_distributed_executor.CustomRayDistributedExecutor")
 elif Version("0.13.0") <= vllm_version < Version("0.15.0"):

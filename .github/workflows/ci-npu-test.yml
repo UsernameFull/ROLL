@@ -77,7 +77,6 @@ jobs:
           ROLL_RUN_EXTERNAL_AGENTIC_TESTS: "0"
           ROLL_RUN_AGENTIC_SANDBOX_TESTS: "0"
           ROLL_RUN_AGENTIC_ENV_MANAGER_DEBUG_TESTS: "0"
-          ROLL_RUN_AGENTIC_ROLLOUT_TESTS: "0"
 
   npu-test:
     name: NPU Integration Tests

@@ -72,7 +72,11 @@ def _has_accelerator_devices(min_devices: int = 1) -> bool:
     if current_platform.device_type == "cpu":
         return False
     is_available = getattr(current_platform, "is_available", None)
-    return callable(is_available) and bool(is_available()) and _accelerator_device_count() >= min_devices
+    return (
+        callable(is_available)
+        and bool(is_available())
+        and _accelerator_device_count() >= min_devices
+    )
 
 
 def _distributed_backend_for_current_platform() -> str:

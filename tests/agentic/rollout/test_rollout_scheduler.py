@@ -1,5 +1,5 @@
 import asyncio
-from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import pytest
 import ray
@@ -9,38 +9,31 @@ from roll.distributed.scheduler.rollout_scheduler import GroupQueueManager
 from roll.pipeline.agentic.agentic_config import EnvMonitorConfig
 
 
-class NoOpGroupFilter:
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def filter(self, group_id: int, episode_id: int, group: list[DataProto]):
-        return False
-
-
-@dataclass
-class MockAgenticConfig:
-    rollout_batch_size: int
-    async_generation_ratio: int
-    env_monitor: EnvMonitorConfig = field(default_factory=lambda: EnvMonitorConfig(enable=False))
+def _make_config(rollout_batch_size: int, async_generation_ratio: int):
+    return SimpleNamespace(
+        rollout_batch_size=rollout_batch_size,
+        async_generation_ratio=async_generation_ratio,
+        env_monitor=EnvMonitorConfig(enable=False),
+    )
 
 
-class MockEnvManagerConfig:
-    def __init__(self, rollout_batch_size: int, group_size: int = 2, env_groups: int = 2):
-        self.world_size = 1
-        self.env_groups = env_groups
-        self.group_size = group_size
-        self.group_size_redundancy = 0
-        self.group_filter_cls = "tests.agentic.rollout.test_rollout_scheduler.NoOpGroupFilter"
-
-        train_env_num = env_groups * group_size
-        self.max_traj_per_env = (rollout_batch_size + train_env_num - 1) // train_env_num
-        self.max_env_num_per_worker = train_env_num
-        self.env_configs = {
+def _make_env_manager_config(rollout_batch_size: int, group_size: int = 2, env_groups: int = 2):
+    train_env_num = env_groups * group_size
+    return SimpleNamespace(
+        world_size=1,
+        env_groups=env_groups,
+        group_size=group_size,
+        group_size_redundancy=0,
+        group_filter_cls="roll.pipeline.agentic.agentic_pipeline.GroupFilter",
+        max_traj_per_env=(rollout_batch_size + train_env_num - 1) // train_env_num,
+        max_env_num_per_worker=train_env_num,
+        env_configs={
             0: {
                 env_id: {"group_id": env_id // group_size}
                 for env_id in range(train_env_num)
             }
-        }
+        },
+    )
 
 
 async def _put_one_group(output_queue, group_id: int, group_size: int, step: int):
@@ -59,8 +52,8 @@ async def _put_one_group(output_queue, group_id: int, group_size: int, step: int
 
 async def _run_group_queue_manager_smoke():
     rollout_batch_size = 4
-    config = MockAgenticConfig(rollout_batch_size=rollout_batch_size, async_generation_ratio=0)
-    env_manager_config = MockEnvManagerConfig(rollout_batch_size=rollout_batch_size)
+    config = _make_config(rollout_batch_size=rollout_batch_size, async_generation_ratio=0)
+    env_manager_config = _make_env_manager_config(rollout_batch_size=rollout_batch_size)
     env_num = env_manager_config.world_size * env_manager_config.max_env_num_per_worker
 
     output_queue = GroupQueueManager.options(max_concurrency=env_num + 1).remote(

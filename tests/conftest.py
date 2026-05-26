@@ -27,6 +27,19 @@ def pytest_configure(config):
     config.option.durations = 0
     config.option.durations_min = 1
     config.option.verbose = True
+    config.addinivalue_line("markers", "skip_on_npu: skip test when running on Ascend NPU")
+
+
+def pytest_collection_modifyitems(config, items):
+    from roll.platforms import current_platform
+
+    if not current_platform.is_npu():
+        return
+
+    skip_on_npu = pytest.mark.skip(reason="skipped on Ascend NPU")
+    for item in items:
+        if "skip_on_npu" in item.keywords:
+            item.add_marker(skip_on_npu)
 
 
 def pytest_addoption(parser):

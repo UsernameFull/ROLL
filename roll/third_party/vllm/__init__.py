@@ -18,23 +18,17 @@ from roll.utils.logging import get_logger
 
 logger = get_logger()
 
-vllm_version = Version(vllm.__version__)
-
-if Version("0.8.4") == vllm_version:
+if Version("0.8.4") == Version(vllm.__version__):
     import roll.third_party.vllm.vllm_0_8_4 # apply patch
     ray_executor_class_v0 = safe_import_class("roll.third_party.vllm.vllm_0_8_4.ray_distributed_executor.CustomRayDistributedExecutor")
     ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_8_4.v1.ray_distributed_executor.CustomRayDistributedExecutor")
-elif Version("0.10.2") == vllm_version:
+elif Version("0.10.2") == Version(vllm.__version__):
     ray_executor_class_v0 = safe_import_class("roll.third_party.vllm.vllm_0_10_2.ray_distributed_executor.CustomRayDistributedExecutor")
     ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_10_2.v1.ray_distributed_executor.CustomRayDistributedExecutor")
-elif vllm_version in {
-    Version("0.11.0"),
-    Version("0.11.1rc1"),
-    Version("0.11.1rc2.dev0+gc3a722fcb.d20251021"),
-}:
+elif Version("0.11.0") == Version(vllm.__version__) or Version("0.11.1rc1") == Version(vllm.__version__) or Version("0.11.1rc2.dev0+gc3a722fcb.d20251021") == Version(vllm.__version__):
     ray_executor_class_v0 = safe_import_class("roll.third_party.vllm.vllm_0_11_0.ray_distributed_executor.CustomRayDistributedExecutor")
     ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_11_0.v1.ray_distributed_executor.CustomRayDistributedExecutor")
-elif Version("0.12.0") == vllm_version:
+elif Version("0.12.0") == Version(vllm.__version__):
     ray_executor_class_v0 = None  # V0 deprecated
     ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_12_0.ray_distributed_executor.CustomRayDistributedExecutor")
 elif Version("0.13.0") <= vllm_version < Version("0.15.0"):
@@ -70,7 +64,7 @@ async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = ""
     # torch.cuda may already init, explicitly disable expandable_segments
     # here (only matters when VLLM_USE_RAY_SPMD_WORKER=0)
-    current_platform.set_allocator_settings("expandable_segments:False")
+    current_platform.memory._set_allocator_settings("expandable_segments:False")
 
     os.environ["VLLM_CACHE_ROOT"] = os.path.join(get_default_cache_root(), "vllm", os.environ.get("WORKER_NAME", ""))
 

@@ -1,17 +1,22 @@
 import os
 import pytest
 
-if os.getenv("ROLL_RUN_AGENTIC_SANDBOX_TESTS") != "1":
-    pytest.skip("requires an interactive cloud sandbox service", allow_module_level=True)
-
-from roll.pipeline.agentic.env.sandbox import SokobanSandboxEnv
 import traceback
 
+
+@pytest.mark.skip_on_npu
+@pytest.mark.skipif(
+    os.getenv("ROLL_RUN_AGENTIC_SANDBOX_TESTS") != "1",
+    reason="requires an interactive cloud sandbox service",
+)
 def test_sandbox():
     """
     Main function to run an interactive test session with the SokobanSandboxEnv.
     """
-    try: 
+    from roll.pipeline.agentic.env.sandbox import SokobanSandboxEnv
+
+    env = None
+    try:
         env = SokobanSandboxEnv()
         print("--- Initialization Successful! ---")
         

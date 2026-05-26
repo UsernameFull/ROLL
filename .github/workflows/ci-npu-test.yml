@@ -47,9 +47,10 @@ jobs:
           # Install PyTorch CPU-only to keep CI lightweight
           pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
           # Install core test dependencies (subset of requirements_common.txt)
-          pip install pytest pytest-timeout numpy tensordict pydantic dacite \
+          pip install pytest pytest-timeout pytest-asyncio numpy tensordict pydantic dacite \
             more_itertools hydra-core omegaconf peft==0.12.0 datasets==3.1.0 \
-            trl==0.9.6 transformers ray[default] sympy deprecated codetiming pybase64 imageio
+            trl==0.9.6 transformers ray[default] sympy deprecated codetiming pybase64 imageio \
+            jsonschema mcp gem-llm==0.0.4 gym 'gymnasium[toy-text]' gym_sokoban
           # Install mcore_adapter and roll itself
           pip install -e ./mcore_adapter
           pip install -e .
@@ -64,7 +65,7 @@ jobs:
                  tests/utils/test_cp_rmpad_ulysses_utils.py \
                  tests/datasets/test_collator.py \
                  tests/datasets/test_sampler.py \
-                 tests/agentic/test_segment_masked_mean.py \
+                 tests/agentic \
                  tests/test_ref_worker_type_consistency.py \
                  tests/distributed/scheduler/test_protocol.py \
                  tests/distributed/scheduler/test_protocol_padding.py \
@@ -73,6 +74,10 @@ jobs:
                  -v --timeout=300 -x
         env:
           PYTHONPATH: ${{ github.workspace }}
+          ROLL_RUN_EXTERNAL_AGENTIC_TESTS: "0"
+          ROLL_RUN_AGENTIC_SANDBOX_TESTS: "0"
+          ROLL_RUN_AGENTIC_ENV_MANAGER_DEBUG_TESTS: "0"
+          ROLL_RUN_AGENTIC_ROLLOUT_TESTS: "0"
 
   npu-test:
     name: NPU Integration Tests
@@ -281,7 +286,6 @@ jobs:
           export PYTHONPATH="${GITHUB_WORKSPACE}:${PYTHONPATH:-}"
           python3 -m pytest tests/third_party/sglang \
                             tests/third_party/vllm \
-                            tests/agentic \
                             tests/datasets \
                             tests/distributed \
                             tests/models \

@@ -1,15 +1,19 @@
+import json
 import os
+
 import pytest
 
-if os.getenv("ROLL_RUN_EXTERNAL_AGENTIC_TESTS") != "1":
-    pytest.skip("requires access to the external Sokoban MCP service", allow_module_level=True)
 
-import json
-from roll.pipeline.agentic.env.mcp.mcp_client import MCPClient
-
+@pytest.mark.skip_on_npu
+@pytest.mark.skipif(
+    os.getenv("ROLL_RUN_EXTERNAL_AGENTIC_TESTS") != "1",
+    reason="requires access to the external Sokoban MCP service",
+)
 @pytest.mark.asyncio
 async def test_sokoban_mcp_server_interaction():
-    async with MCPClient("http://sokoban-mcp.alibaba-inc.com/sse") as client: 
+    from roll.pipeline.agentic.env.mcp.mcp_client import MCPClient
+
+    async with MCPClient("http://sokoban-mcp.alibaba-inc.com/sse") as client:
         tools_list = await client.tools()
         tool_names = [tool.name for tool in tools_list]
         assert "reset" in tool_names, "reset tool not found in server tools"

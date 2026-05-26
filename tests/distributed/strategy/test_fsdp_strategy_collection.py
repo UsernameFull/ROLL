@@ -838,7 +838,8 @@ class _TinyMLP(torch.nn.Module):
         self.loss_fn = torch.nn.MSELoss()
 
     def forward(self, inputs, targets):
-        return self.loss_fn(self.layers(inputs), targets)
+        outputs = self.layers(inputs)
+        return self.loss_fn(outputs.float(), targets.float())
 
 
 def _find_free_port():

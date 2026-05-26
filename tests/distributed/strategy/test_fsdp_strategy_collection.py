@@ -59,6 +59,69 @@ class _PlatformStub:
             torch.set_rng_state(state)
 
 
+def _accelerator_device_count() -> int:
+    if current_platform.device_type == "cpu":
+        return 0
+    device_count = getattr(current_platform, "device_count", None)
+    if not callable(device_count):
+        return 0
+    return int(device_count())
+
+
+def _has_accelerator_devices(min_devices: int = 1) -> bool:
+    if current_platform.device_type == "cpu":
+        return False
+    is_available = getattr(current_platform, "is_available", None)
+    return callable(is_available) and bool(is_available()) and _accelerator_device_count() >= min_devices
+
+
+def _distributed_backend_for_current_platform() -> str:
+    if current_platform.device_type == "cpu":
+        return "gloo"
+    return f"cpu:gloo,{current_platform.device_type}:{current_platform.communication_backend}"
+
+
+def _device_from_current_platform_device(device_id) -> torch.device:
+    if isinstance(device_id, torch.device):
+        return device_id
+    return torch.device(current_platform.device_type, int(device_id))
+
+
+def _current_test_device() -> torch.device:
+    if current_platform.device_type == "cpu":
+        return torch.device("cpu")
+    current_device = getattr(current_platform, "current_device", None)
+    if callable(current_device):
+        return _device_from_current_platform_device(current_device())
+    return torch.device(current_platform.device_type)
+
+
+def _set_test_device_for_rank(rank: int) -> torch.device:
+    if current_platform.device_type == "cpu":
+        return torch.device("cpu")
+    device_index = rank % _accelerator_device_count()
+    set_device = getattr(current_platform, "set_device", None)
+    if callable(set_device):
+        set_device(device_index)
+    return torch.device(current_platform.device_type, device_index)
+
+
+def _mixed_precision_policy_for_current_platform():
+    if current_platform.is_cuda():
+        return MixedPrecisionPolicy(
+            param_dtype=torch.float16,
+            reduce_dtype=torch.float32,
+            cast_forward_inputs=True,
+        )
+    return None
+
+
+def _cpu_offload_policy_for_current_platform():
+    if current_platform.device_type == "cpu":
+        return None
+    return CPUOffloadPolicy(pin_memory=current_platform.is_cuda())
+
+
 class DummyTrainingArgs:
     def __init__(self):
         self.per_device_train_batch_size = 2
@@ -463,12 +526,8 @@ def test_clip_grad_norm_cpu_offload_uses_dummy_helper(
 
 
 def _fsdp2_cpu_offload_grad_clip_worker(rank, world_size, port):
-    use_cuda = torch.cuda.is_available()
-    backend = "nccl" if use_cuda else "gloo"
-    fsdp2_strategy.current_platform = _PlatformStub(
-        device_type="cuda" if use_cuda else "cpu",
-        backend=backend,
-    )
+    backend = _distributed_backend_for_current_platform()
+    fsdp2_strategy.current_platform = current_platform
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = str(port)
     os.environ["RANK"] = str(rank)
@@ -479,28 +538,14 @@ def _fsdp2_cpu_offload_grad_clip_worker(rank, world_size, port):
         world_size=world_size,
     )
     try:
-        if use_cuda:
-            torch.cuda.set_device(rank % torch.cuda.device_count())
-            device = torch.device("cuda", torch.cuda.current_device())
-        else:
-            device = torch.device("cpu")
+        device = _set_test_device_for_rank(rank)
 
         model = _TinyMLP(input_dim=4, hidden_dim=4, output_dim=2).to(device)
         mesh = create_device_mesh_with_ulysses(
             world_size=world_size, fsdp_size=world_size
         )
-        mp_policy = (
-            MixedPrecisionPolicy(
-                param_dtype=torch.float16,
-                reduce_dtype=torch.float32,
-                cast_forward_inputs=True,
-            )
-            if use_cuda
-            else None
-        )
-        offload_policy = (
-            CPUOffloadPolicy(pin_memory=True) if use_cuda else False
-        )
+        mp_policy = _mixed_precision_policy_for_current_platform()
+        offload_policy = _cpu_offload_policy_for_current_platform()
         fsdp_kwargs = {
             "mesh": mesh,
             "reshard_after_forward": True,
@@ -519,7 +564,7 @@ def _fsdp2_cpu_offload_grad_clip_worker(rank, world_size, port):
 
         strategy = FSDP2TrainStrategy.__new__(FSDP2TrainStrategy)
         strategy.model = model
-        strategy.cpu_offload_enabled = True
+        strategy.cpu_offload_enabled = offload_policy is not None
 
         total_norm = strategy._clip_grad_norm(max_norm=0.5)
         scalar_norm = (
@@ -548,11 +593,11 @@ def _fsdp2_cpu_offload_grad_clip_worker(rank, world_size, port):
     reason="torch.distributed is not available",
 )
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CPU-offload grad clip test requires CUDA",
+    not _has_accelerator_devices(),
+    reason="CPU-offload grad clip test requires an accelerator",
 )
 def test_fsdp2_cpu_offload_grad_clip_distributed():
-    world_size = min(2, torch.cuda.device_count())
+    world_size = min(2, _accelerator_device_count())
     port = _find_free_port()
     mp.spawn(
         _fsdp2_cpu_offload_grad_clip_worker,
@@ -813,22 +858,16 @@ def _collect_full_state(model):
     for name, param in model.named_parameters():
         tensor = param.detach()
         if DTensor is not None and isinstance(tensor, DTensor):
-            if tensor.device.type == "cpu" and torch.cuda.is_available():
-                tensor = tensor.to("cuda")
+            if tensor.device.type == "cpu" and _has_accelerator_devices():
+                tensor = tensor.to(_current_test_device())
             tensor = tensor.full_tensor()
         state[name] = tensor.cpu().numpy()
     return state
 
 
 def _fsdp2_training_worker(rank, world_size, port, steps):
-    use_cuda = torch.cuda.is_available()
-    backend = "nccl" if use_cuda else "gloo"
-    fsdp2_strategy.current_platform = _PlatformStub(
-        device_type="cuda" if use_cuda else "cpu", backend=backend
-    )
-    current_platform = _PlatformStub(
-        device_type="cuda" if use_cuda else "cpu", backend=backend
-    )
+    backend = _distributed_backend_for_current_platform()
+    fsdp2_strategy.current_platform = current_platform
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = str(port)
     os.environ["RANK"] = str(rank)
@@ -837,31 +876,21 @@ def _fsdp2_training_worker(rank, world_size, port, steps):
         backend=backend, rank=rank, world_size=world_size
     )
     try:
-        if use_cuda:
-            torch.cuda.set_device(rank)
-            device = torch.device("cuda", rank)
-        else:
-            device = torch.device("cpu")
+        device = _set_test_device_for_rank(rank)
         torch.manual_seed(0)
         np.random.seed(0)
         random.seed(0)
 
-        model = _TinyMLP()
+        model = _TinyMLP().to(device)
         model.train()
         mesh = create_device_mesh_with_ulysses(
             world_size=world_size, fsdp_size=world_size
         )
-        mp_policy = (
-            MixedPrecisionPolicy(
-                param_dtype=torch.float16,
-                reduce_dtype=torch.float32,
-                cast_forward_inputs=True,
-            )
-            if use_cuda
-            else None
-        )
+        mp_policy = _mixed_precision_policy_for_current_platform()
         offload_policy = (
-            CPUOffloadPolicy(pin_memory=True) if use_cuda else False
+            _cpu_offload_policy_for_current_platform()
+            if current_platform.is_cuda()
+            else None
         )
         fsdp_kwargs = {
             "mesh": mesh,
@@ -924,8 +953,8 @@ def _fsdp2_training_worker(rank, world_size, port, steps):
     reason="torch.distributed is not available",
 )
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="FSDP2 distributed training sync test requires CUDA",
+    not _has_accelerator_devices(2),
+    reason="FSDP2 distributed training sync test requires >=2 accelerator devices",
 )
 def test_fsdp2_distributed_training_keeps_states_in_sync():
     world_size = 2

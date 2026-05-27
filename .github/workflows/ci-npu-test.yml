@@ -191,7 +191,25 @@ jobs:
 
       - name: Install ROLL requirements
         run: |
-          python3 -m pip install -r requirements_common.txt
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          skip_packages = {"sglang-router", "wandb", "swanlab", "trackio"}
+          source = Path("requirements_common.txt")
+          target = Path("/tmp/requirements_npu_ci.txt")
+          lines = []
+          for line in source.read_text().splitlines():
+              requirement = line.split("#", 1)[0].strip()
+              package_name = re.split(r"[\[<>=!~; ]", requirement, maxsplit=1)[0]
+              package_name = package_name.replace("_", "-").lower()
+              if package_name in skip_packages:
+                  print(f"skip optional dependency: {requirement}")
+                  continue
+              lines.append(line)
+          target.write_text("\n".join(lines) + "\n")
+          PY
+          python3 -m pip install -r /tmp/requirements_npu_ci.txt
           python3 -m pip install deepspeed==0.16.4 tensorboard
 
       - name: Install SGLang NPU kernel from source

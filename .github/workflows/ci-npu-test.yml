@@ -86,6 +86,8 @@ jobs:
       VLLM_USE_V1: "1"
       # The CI vLLM smoke uses TP=1; FlashComm sequence parallelism requires TP>1.
       VLLM_ASCEND_ENABLE_FLASHCOMM: "0"
+      # vLLM-Ascend sleep/wake rejects FRACTAL_NZ for RL-style weight reload flows.
+      VLLM_ASCEND_ENABLE_NZ: "0"
       SGLANG_KERNEL_NPU_REPO: https://github.com/sgl-project/sgl-kernel-npu.git
       SGLANG_KERNEL_NPU_BRANCH: main
       SGLANG_KERNEL_NPU_CACHE_KEY: main

@@ -41,8 +41,10 @@ async def _shutdown_async_llm(model):
 async def _run_vllm_offload():
     os.environ["VLLM_USE_V1"] = "1"
     old_task_queue_enable = os.environ.get("TASK_QUEUE_ENABLE")
+    old_vllm_ascend_enable_nz = os.environ.get("VLLM_ASCEND_ENABLE_NZ")
     if current_platform.is_npu():
         os.environ["TASK_QUEUE_ENABLE"] = "1"
+        os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
     model = None
     resource_manager = None
     try:
@@ -107,6 +109,10 @@ async def _run_vllm_offload():
             os.environ.pop("TASK_QUEUE_ENABLE", None)
         else:
             os.environ["TASK_QUEUE_ENABLE"] = old_task_queue_enable
+        if old_vllm_ascend_enable_nz is None:
+            os.environ.pop("VLLM_ASCEND_ENABLE_NZ", None)
+        else:
+            os.environ["VLLM_ASCEND_ENABLE_NZ"] = old_vllm_ascend_enable_nz
 
 
 def test_vllm_offload():

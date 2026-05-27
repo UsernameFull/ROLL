@@ -86,6 +86,7 @@ class NpuPlatform(Platform):
             "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
             "ASCEND_RT_VISIBLE_DEVICES": f"{gpu_rank}",
             "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+            "VLLM_ASCEND_ENABLE_NZ": "0",
             # vLLM-Ascend's memory pool is incompatible with expandable
             # segments, even if the broader NPU test job enables them.
             "PYTORCH_NPU_ALLOC_CONF": "",

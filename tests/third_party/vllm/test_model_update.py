@@ -10,6 +10,7 @@ from roll.distributed.scheduler.resource_manager import ResourceManager
 from roll.platforms import current_platform
 from roll.third_party.vllm import create_async_llm
 from roll.third_party.vllm.worker import WorkerV1
+from roll.utils import checkpoint_manager
 from roll.utils.checkpoint_manager import download_model
 from tests.third_party.vllm.utils import generate_batch, chat_prompts, print_request_output
 
@@ -105,6 +106,7 @@ async def _run_vllm_offload():
             resource_manager.destroy_placement_group()
         if ray.is_initialized():
             ray.shutdown()
+        checkpoint_manager.shared_storage = None
         if old_task_queue_enable is None:
             os.environ.pop("TASK_QUEUE_ENABLE", None)
         else:

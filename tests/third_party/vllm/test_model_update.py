@@ -6,8 +6,8 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM
 from vllm import SamplingParams
 
-from roll.distributed.scheduler.initialize import init
 from roll.distributed.scheduler.resource_manager import ResourceManager
+from roll.platforms import current_platform
 from roll.third_party.vllm import create_async_llm
 from roll.third_party.vllm.worker import WorkerV1
 from roll.utils.checkpoint_manager import download_model
@@ -40,10 +40,13 @@ async def _shutdown_async_llm(model):
 
 async def _run_vllm_offload():
     os.environ["VLLM_USE_V1"] = "1"
+    old_task_queue_enable = os.environ.get("TASK_QUEUE_ENABLE")
+    if current_platform.is_npu():
+        os.environ["TASK_QUEUE_ENABLE"] = "1"
     model = None
     resource_manager = None
-    init()
     try:
+        ray.init(ignore_reinit_error=True)
         resource_manager = ResourceManager(2, 1)
         placement_groups = resource_manager.allocate_placement_group(world_size=1, device_mapping=[0, 1])
 
@@ -60,7 +63,7 @@ async def _run_vllm_offload():
             distributed_executor_backend="ray",
             disable_custom_all_reduce=True,
             enable_sleep_mode=True,
-            enforce_eager=False,
+            enforce_eager=current_platform.is_npu(),
             worker_extension_cls="tests.third_party.vllm.test_model_update.ModelUpdateWorker",
         )
 
@@ -100,6 +103,10 @@ async def _run_vllm_offload():
             resource_manager.destroy_placement_group()
         if ray.is_initialized():
             ray.shutdown()
+        if old_task_queue_enable is None:
+            os.environ.pop("TASK_QUEUE_ENABLE", None)
+        else:
+            os.environ["TASK_QUEUE_ENABLE"] = old_task_queue_enable
 
 
 def test_vllm_offload():

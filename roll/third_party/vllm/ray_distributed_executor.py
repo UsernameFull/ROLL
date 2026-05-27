@@ -1,3 +1,4 @@
+import inspect
 import os
 from collections import defaultdict
 from typing import TYPE_CHECKING
@@ -32,6 +33,20 @@ def _ray_remote_resource_options() -> dict:
     if roll_current_platform.ray_device_key == "NPU":
         return {"num_gpus": 0, "resources": {roll_current_platform.ray_device_key: 0.01}}
     raise RuntimeError(f"Unsupported vLLM Ray device resource: {roll_current_platform.ray_device_key}")
+
+
+def _ray_worker_wrapper_kwargs(vllm_config, rank: int) -> dict:
+    try:
+        from vllm.v1.worker.worker_base import WorkerWrapperBase
+
+        parameters = inspect.signature(WorkerWrapperBase.__init__).parameters
+    except Exception:
+        parameters = {"vllm_config": None}
+
+    kwargs = {"rpc_rank": rank}
+    if "vllm_config" in parameters:
+        kwargs["vllm_config"] = vllm_config
+    return kwargs
 
 
 class CustomRayDistributedExecutor(RayDistributedExecutor):
@@ -103,7 +118,9 @@ class CustomRayDistributedExecutor(RayDistributedExecutor):
                     placement_group=pg,
                 ),
                 **ray_remote_kwargs,
-            )(RayWorkerWrapper).remote(vllm_config=self.vllm_config, rpc_rank=rank)
+            )(RayWorkerWrapper).remote(
+                **_ray_worker_wrapper_kwargs(self.vllm_config, rank)
+            )
             worker_metadata.append(RayWorkerMetaData(worker=worker, created_rank=rank))
 
         worker_ips = ray.get(

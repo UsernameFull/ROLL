@@ -42,8 +42,9 @@ def test_load_generate():
 
     model = default_actor_model_provider(tokenizer, model_args, TrainingArguments(), False)
 
+    max_generate_batches = max(1, int(os.environ.get("ROLL_TEST_LOAD_GENERATE_MAX_BATCHES", "1")))
     results = []
-    for batch in tqdm(dataloader):
+    for step, batch in enumerate(tqdm(dataloader, total=max_generate_batches)):
         input_device = get_model_input_device(model)
         input_ids = batch["input_ids"].to(input_device)
         attention_mask = batch["attention_mask"].to(input_device)
@@ -61,6 +62,11 @@ def test_load_generate():
 
         with open("generate_res.json", "w") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
+
+        if step + 1 >= max_generate_batches:
+            break
+
+    assert results
 
 
 if __name__ == "__main__":

@@ -78,7 +78,7 @@ jobs:
     timeout-minutes: 120
     container:
       # Pre-built NPU docker image (built from docker/Dockerfile.A3) with all deps pre-installed
-      image: swr.cn-north-4.myhuaweicloud.com/ascend-cicd/roll:main-a3
+      image: quay.io/ascend/vllm-ascend:main-a3
     env:
       HF_ENDPOINT: https://hf-mirror.com
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
@@ -105,7 +105,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-npu-pip-${{ env.SGLANG_KERNEL_NPU_CACHE_KEY }}-${{ env.SGLANG_CACHE_KEY }}-${{ hashFiles('requirements_common.txt', 'mcore_adapter/pyproject.toml', 'mcore_adapter/requirements.txt', 'setup.py', 'pyproject.toml', '.github/workflows/ci-npu-test.yml') }}
+          key: ${{ runner.os }}-npu-pip-${{ env.SGLANG_KERNEL_NPU_CACHE_KEY }}-${{ env.SGLANG_CACHE_KEY }}-${{ hashFiles('requirements_common.txt', 'requirements_vision.txt', 'mcore_adapter/pyproject.toml', 'mcore_adapter/requirements.txt', 'setup.py', 'pyproject.toml', '.github/workflows/ci-npu-test.yml') }}
           restore-keys: |
             ${{ runner.os }}-npu-pip-${{ env.SGLANG_KERNEL_NPU_CACHE_KEY }}-${{ env.SGLANG_CACHE_KEY }}-
             ${{ runner.os }}-npu-pip-${{ env.SGLANG_CACHE_KEY }}-
@@ -180,6 +180,11 @@ jobs:
       - name: Install pytest dependencies
         run: |
           pip install pytest-timeout
+
+      - name: Install ROLL requirements
+        run: |
+          python3 -m pip install -r requirements_common.txt
+          python3 -m pip install deepspeed==0.16.4 tensorboard
 
       - name: Install SGLang NPU kernel from source
         shell: bash

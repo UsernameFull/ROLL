@@ -80,6 +80,7 @@ jobs:
       # Pre-built NPU docker image (built from docker/Dockerfile.A3) with all deps pre-installed
       image: quay.io/ascend/vllm-ascend:main-a3
     env:
+      PIP_CACHE_DIR: ${{ github.workspace }}/.pip-cache
       HF_ENDPOINT: https://hf-mirror.com
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       TASK_QUEUE_ENABLE: "2"
@@ -104,12 +105,17 @@ jobs:
       - name: Cache NPU pip packages
         uses: actions/cache@v4
         with:
-          path: ~/.cache/pip
+          path: .pip-cache
           key: ${{ runner.os }}-npu-pip-${{ env.SGLANG_KERNEL_NPU_CACHE_KEY }}-${{ env.SGLANG_CACHE_KEY }}-${{ hashFiles('requirements_common.txt', 'requirements_vision.txt', 'mcore_adapter/pyproject.toml', 'mcore_adapter/requirements.txt', 'setup.py', 'pyproject.toml', '.github/workflows/ci-npu-test.yml') }}
           restore-keys: |
             ${{ runner.os }}-npu-pip-${{ env.SGLANG_KERNEL_NPU_CACHE_KEY }}-${{ env.SGLANG_CACHE_KEY }}-
             ${{ runner.os }}-npu-pip-${{ env.SGLANG_CACHE_KEY }}-
             ${{ runner.os }}-npu-pip-
+
+      - name: Configure pip cache
+        run: |
+          mkdir -p "$PIP_CACHE_DIR"
+          python3 -m pip cache dir
 
       - name: Configure Ascend runtime
         shell: bash
@@ -151,30 +157,32 @@ jobs:
 
       - name: Show environment info
         run: |
-          echo "=== Python ==="
-          python3 --version
-          python3 -m pip --version
-          echo "=== PyTorch ==="
-          python3 -c "import torch; print(f'torch={torch.__version__}')"
-          echo "=== NPU ==="
-          python3 -c "
+          python3 - <<'PY'
+          import importlib.util
+          import importlib.metadata as metadata
+          import sys
+
           import torch
           import torch_npu
-          import importlib.util
 
+          def module_available(name):
+              return importlib.util.find_spec(name) is not None
+
+          print(f"python={sys.version.split()[0]}")
+          print(f"pip={metadata.version('pip')}")
+          print(f"torch={torch.__version__}")
           print(f'torch_npu={torch_npu.__version__}')
-          tbe_spec = importlib.util.find_spec('tbe')
-          print(f'tbe_module={tbe_spec is not None}')
-          if tbe_spec is None:
+
+          modules = ('tbe', 'decorator', 'attrs', 'psutil', 'scipy', 'cloudpickle', 'tornado', 'ml_dtypes')
+          for module_name in modules:
+              print(f'{module_name}_module={module_available(module_name)}')
+
+          if not module_available('tbe'):
               raise RuntimeError('CANN tbe Python module is not visible in PYTHONPATH')
-          for module_name in ('decorator', 'attrs', 'psutil', 'scipy', 'cloudpickle', 'tornado', 'ml_dtypes'):
-              module_spec = importlib.util.find_spec(module_name)
-              print(f'{module_name}_module={module_spec is not None}')
           if not torch.npu.is_available():
               raise RuntimeError('torch.npu.is_available() is False')
           print(f'npu_device_count={torch.npu.device_count()}')
-          "
-          echo "=== Ascend ==="
+          PY
           npu-smi info
 
       - name: Install pytest dependencies
@@ -263,18 +271,20 @@ jobs:
       - name: Show vLLM Ascend info
         run: |
           python3 - <<'PY'
-          import importlib.metadata
+          import importlib.metadata as metadata
 
           import vllm
-          import vllm_ascend
           from roll.platforms import current_platform
 
-          for package_name in ("transformers", "deepspeed", "triton-ascend"):
+          def package_version(name):
               try:
-                  package_version = importlib.metadata.version(package_name)
-              except importlib.metadata.PackageNotFoundError:
-                  package_version = "not installed"
-              print(f"{package_name}={package_version}")
+                  return metadata.version(name)
+              except metadata.PackageNotFoundError:
+                  return "not installed"
+
+          packages = ("vllm-ascend", "transformers", "deepspeed", "triton-ascend")
+          for package_name in packages:
+              print(f"{package_name}={package_version(package_name)}")
 
           print(f"vllm={vllm.__version__}")
           print(f"platform={current_platform.device_type}")

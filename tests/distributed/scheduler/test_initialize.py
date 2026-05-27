@@ -1,5 +1,4 @@
 import ray
-import pytest
 
 from roll.distributed.scheduler.initialize import init
 
@@ -15,7 +14,6 @@ class MyActor:
         return msg
 
 
-@pytest.mark.skip(reason="Requires a multi-node Ray cluster; STRICT_SPREAD placement can hang in CI.")
 def test_ray_cluster_func():
     init()
     placement_group = ray.util.placement_group(bundles=[{"CPU": 1}, {"CPU": 1}], strategy="STRICT_SPREAD")

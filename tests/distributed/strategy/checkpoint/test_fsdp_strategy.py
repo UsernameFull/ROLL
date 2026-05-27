@@ -14,7 +14,7 @@ from tests.distributed.strategy.make_baseline_config import make_baseline_config
 logger = get_logger()
 
 
-class ModelCheckpointPipeline(BasePipeline):
+class TestModelCheckpointPipeline(BasePipeline):
 
     def __init__(self, pipeline_config: RLVRConfig):
         super().__init__(pipeline_config)
@@ -50,5 +50,5 @@ if __name__ == "__main__":
     #     config_path="./checkpoint", config_name="fsdp_lora_config"
     # )
 
-    pipeline = ModelCheckpointPipeline(ppo_config)
+    pipeline = TestModelCheckpointPipeline(ppo_config)
     metric_list = pipeline.run()

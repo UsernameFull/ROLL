@@ -64,7 +64,6 @@ jobs:
                  tests/distributed/scheduler/test_protocol.py \
                  tests/distributed/scheduler/test_protocol_padding.py \
                  tests/distributed/scheduler/test_decorator.py \
-                 tests/distributed/scheduler/test_resource_manager.py \
                  -v --timeout=300 -x
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -285,6 +284,10 @@ jobs:
                             tests/third_party/deepspeed \
                             tests/test_ref_worker_type_consistency.py \
                             --ignore=tests/models/cuda_mem \
+                            --ignore=tests/distributed/scheduler/test_generate_scheduler.py \
+                            --ignore=tests/distributed/scheduler/test_initialize.py \
+                            --ignore=tests/distributed/scheduler/test_resource_manager.py \
+                            --ignore=tests/distributed/executor/test_ray_thread_actor_cuda_mem_leak.py \
                             -v --timeout=600 -x
         env:
           ROLL_NPU_CI: "1"

@@ -29,14 +29,10 @@ data_args: DataArguments = DataArguments(
     file_name=data_filename,
     prompt="instruction",
 )
-test_batch_size = int(os.environ.get("ROLL_TEST_MODEL_BATCH_SIZE", "1"))
-test_max_batches = int(os.environ.get("ROLL_TEST_MAX_MODEL_BATCHES", "1"))
-test_max_new_tokens = int(os.environ.get("ROLL_TEST_MAX_NEW_TOKENS", "8"))
-
 
 @pytest.mark.skipif(current_platform.is_npu(), reason="accelerate.cpu_offload_with_hook requires CUDA")
 def test_hf_multi_gpus_cpu_offload_with_hook():
-    dataloader, tokenizer = get_mock_dataloader(model_args=model_args, data_args=data_args, batch_size=test_batch_size)
+    dataloader, tokenizer = get_mock_dataloader(model_args=model_args, data_args=data_args, batch_size=4)
     model = default_actor_model_provider(tokenizer, model_args, TrainingArguments(),  False)
 
     hook = None
@@ -49,7 +45,7 @@ def test_hf_multi_gpus_cpu_offload_with_hook():
         output = model.generate(
             input_ids,
             attention_mask=attention_mask,
-            max_new_tokens=test_max_new_tokens,
+            max_new_tokens=64,
             do_sample=False,
             eos_token_id=[tokenizer.eos_token_id] + tokenizer.additional_special_tokens_ids,
             pad_token_id=tokenizer.pad_token_id,
@@ -67,7 +63,7 @@ def test_hf_multi_gpus_cpu_offload_with_hook():
         output = model.generate(
             input_ids,
             attention_mask=attention_mask,
-            max_new_tokens=test_max_new_tokens,
+            max_new_tokens=64,
             do_sample=False,
             eos_token_id=[tokenizer.eos_token_id] + tokenizer.additional_special_tokens_ids,
             pad_token_id=tokenizer.pad_token_id,
@@ -75,13 +71,11 @@ def test_hf_multi_gpus_cpu_offload_with_hook():
 
         output_str = tokenizer.batch_decode(output, skip_special_tokens=True)
         print(output_str)
-        if i + 1 >= test_max_batches:
-            break
 
 
 @pytest.mark.skipif(current_platform.is_npu(), reason="multi-GPU HF offload test assumes CUDA device maps")
 def test_hf_multi_gpus_cpu_offload_hf_device_map():
-    dataloader, tokenizer = get_mock_dataloader(model_args=model_args, data_args=data_args, batch_size=test_batch_size)
+    dataloader, tokenizer = get_mock_dataloader(model_args=model_args, data_args=data_args, batch_size=4)
     model = default_actor_model_provider(tokenizer, model_args, TrainingArguments(), False)
 
     hook = None
@@ -94,7 +88,7 @@ def test_hf_multi_gpus_cpu_offload_hf_device_map():
         output = model.generate(
             input_ids,
             attention_mask=attention_mask,
-            max_new_tokens=test_max_new_tokens,
+            max_new_tokens=64,
             do_sample=False,
             eos_token_id=[tokenizer.eos_token_id] + tokenizer.additional_special_tokens_ids,
             pad_token_id=tokenizer.pad_token_id,
@@ -114,7 +108,7 @@ def test_hf_multi_gpus_cpu_offload_hf_device_map():
         output = model.generate(
             input_ids,
             attention_mask=attention_mask,
-            max_new_tokens=test_max_new_tokens,
+            max_new_tokens=64,
             do_sample=False,
             eos_token_id=[tokenizer.eos_token_id] + tokenizer.additional_special_tokens_ids,
             pad_token_id=tokenizer.pad_token_id,
@@ -122,8 +116,6 @@ def test_hf_multi_gpus_cpu_offload_hf_device_map():
 
         output_str = tokenizer.batch_decode(output, skip_special_tokens=True)
         print(output_str)
-        if i + 1 >= test_max_batches:
-            break
 
 
 if __name__ == "__main__":

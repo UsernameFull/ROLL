@@ -20,6 +20,17 @@ from roll.utils.logging import get_logger
 
 logger = get_logger()
 
+_DEFAULT_WORKER_SPECIFIC_ENV_VARS = {
+    "VLLM_HOST_IP",
+    "VLLM_HOST_PORT",
+    "LOCAL_RANK",
+    "CUDA_VISIBLE_DEVICES",
+    "HIP_VISIBLE_DEVICES",
+    "ROCR_VISIBLE_DEVICES",
+    "ASCEND_VISIBLE_DEVICES",
+    "ASCEND_RT_VISIBLE_DEVICES",
+}
+
 
 def initialize_ray_cluster(ray_address: str | None = None):
     if ray.is_initialized():
@@ -47,6 +58,23 @@ def _ray_worker_wrapper_kwargs(vllm_config, rank: int) -> dict:
     if "vllm_config" in parameters:
         kwargs["vllm_config"] = vllm_config
     return kwargs
+
+
+def _worker_specific_env_vars() -> set[str]:
+    env_vars = getattr(RayDistributedExecutor, "WORKER_SPECIFIC_ENV_VARS", None)
+    if env_vars is None:
+        try:
+            from vllm.v1.executor import ray_executor
+
+            env_vars = getattr(ray_executor, "WORKER_SPECIFIC_ENV_VARS", None)
+        except Exception:
+            env_vars = None
+
+    env_vars = set(env_vars or _DEFAULT_WORKER_SPECIFIC_ENV_VARS)
+    device_env_var = getattr(current_platform, "device_control_env_var", None)
+    if device_env_var:
+        env_vars.add(device_env_var)
+    return env_vars
 
 
 class CustomRayDistributedExecutor(RayDistributedExecutor):
@@ -190,7 +218,7 @@ class CustomRayDistributedExecutor(RayDistributedExecutor):
 
         # Environment variables to copy from driver to workers
         env_vars_to_copy = get_env_vars_to_copy(
-            exclude_vars=self.WORKER_SPECIFIC_ENV_VARS,
+            exclude_vars=_worker_specific_env_vars(),
             additional_vars=set(current_platform.additional_env_vars).union(
                 getattr(self, "ADDITIONAL_ENV_VARS", set())
             ),

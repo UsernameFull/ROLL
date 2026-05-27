@@ -57,14 +57,8 @@ jobs:
 
       - name: Run CPU-compatible unit tests
         run: |
-          pytest tests/utils/test_action_parser.py \
-                 tests/utils/test_functionals.py \
-                 tests/utils/test_dynamic_batching.py \
-                 tests/utils/test_sequence_packing.py \
-                 tests/utils/test_taskgroups.py \
-                 tests/utils/test_cp_rmpad_ulysses_utils.py \
-                 tests/datasets/test_collator.py \
-                 tests/datasets/test_sampler.py \
+          pytest tests/utils \
+                 tests/datasets \
                  tests/agentic \
                  tests/test_ref_worker_type_consistency.py \
                  tests/distributed/scheduler/test_protocol.py \
@@ -285,12 +279,10 @@ jobs:
           export PYTHONPATH="${GITHUB_WORKSPACE}:${PYTHONPATH:-}"
           python3 -m pytest tests/third_party/sglang \
                             tests/third_party/vllm \
-                            tests/datasets \
                             tests/distributed \
                             tests/models \
                             tests/pipeline \
                             tests/third_party/deepspeed \
-                            tests/utils/ \
                             tests/test_ref_worker_type_consistency.py \
                             --ignore=tests/models/cuda_mem \
                             -v --timeout=600 -x

@@ -232,6 +232,7 @@ jobs:
               "nvidia-cutlass-dsl",
               "nvidia-ml-py",
               "sgl-kernel",
+              "sglang-router",
               "torch",
               "torch-memory-saver",
               "torchaudio",

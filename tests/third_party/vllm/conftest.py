@@ -8,7 +8,6 @@ if os.environ.get("ROLL_NPU_CI") == "1":
         "test_collective_rpc.py",
         "test_fp8.py",
         "test_fp8_perf.py",
-        "test_model_update.py",
         "test_sleep_level.py",
         "test_vllm_local.py",
         "test_vllm_local_actor.py",

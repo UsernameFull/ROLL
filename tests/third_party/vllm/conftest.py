@@ -13,5 +13,4 @@ if os.environ.get("ROLL_NPU_CI") == "1":
         "test_vllm_local_actor.py",
         "test_vllm_local_async.py",
         "test_vllm_mem_oom.py",
-        "vllm_generate_test.py",
     ]

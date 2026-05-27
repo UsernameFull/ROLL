@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from roll.models.model_providers import default_actor_model_provider
 from roll.platforms import current_platform
-from tests.models.load_utils import get_mock_dataloader, get_model_input_device
+from tests.models.load_utils import get_generation_eos_token_ids, get_mock_dataloader, get_model_input_device
 
 
 def test_load_generate():
@@ -52,7 +52,7 @@ def test_load_generate():
             attention_mask=attention_mask,
             max_new_tokens=64,
             do_sample=False,
-            eos_token_id=[tokenizer.eos_token_id] + tokenizer.additional_special_tokens_ids,
+            eos_token_id=get_generation_eos_token_ids(tokenizer),
             pad_token_id=tokenizer.pad_token_id,
         )
 

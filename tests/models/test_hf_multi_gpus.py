@@ -7,7 +7,7 @@ from accelerate import cpu_offload_with_hook
 from roll.configs import ModelArguments, DataArguments, TrainingArguments
 from roll.platforms import current_platform
 from roll.utils.offload_states import offload_hf_model, load_hf_model
-from tests.models.load_utils import get_mock_dataloader, get_model_input_device
+from tests.models.load_utils import get_generation_eos_token_ids, get_mock_dataloader, get_model_input_device
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 
@@ -47,7 +47,7 @@ def test_hf_multi_gpus_cpu_offload_with_hook():
             attention_mask=attention_mask,
             max_new_tokens=64,
             do_sample=False,
-            eos_token_id=[tokenizer.eos_token_id] + tokenizer.additional_special_tokens_ids,
+            eos_token_id=get_generation_eos_token_ids(tokenizer),
             pad_token_id=tokenizer.pad_token_id,
         )
 
@@ -65,7 +65,7 @@ def test_hf_multi_gpus_cpu_offload_with_hook():
             attention_mask=attention_mask,
             max_new_tokens=64,
             do_sample=False,
-            eos_token_id=[tokenizer.eos_token_id] + tokenizer.additional_special_tokens_ids,
+            eos_token_id=get_generation_eos_token_ids(tokenizer),
             pad_token_id=tokenizer.pad_token_id,
         )
 
@@ -90,7 +90,7 @@ def test_hf_multi_gpus_cpu_offload_hf_device_map():
             attention_mask=attention_mask,
             max_new_tokens=64,
             do_sample=False,
-            eos_token_id=[tokenizer.eos_token_id] + tokenizer.additional_special_tokens_ids,
+            eos_token_id=get_generation_eos_token_ids(tokenizer),
             pad_token_id=tokenizer.pad_token_id,
         )
 
@@ -110,7 +110,7 @@ def test_hf_multi_gpus_cpu_offload_hf_device_map():
             attention_mask=attention_mask,
             max_new_tokens=64,
             do_sample=False,
-            eos_token_id=[tokenizer.eos_token_id] + tokenizer.additional_special_tokens_ids,
+            eos_token_id=get_generation_eos_token_ids(tokenizer),
             pad_token_id=tokenizer.pad_token_id,
         )
 

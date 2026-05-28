@@ -12,7 +12,7 @@ from roll.distributed.scheduler.resource_manager import ResourceManager
 from roll.third_party.vllm import create_async_llm
 from roll.third_party.vllm.worker import WorkerV1
 from roll.utils.checkpoint_manager import download_model
-from utils import generate_batch, chat_format, print_current_mem_usage, mem_usage, print_request_output
+from tests.third_party.vllm.utils import generate_batch, chat_format, print_current_mem_usage, mem_usage, print_request_output
 
 
 class Fp8Worker(WorkerV1):

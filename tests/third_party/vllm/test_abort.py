@@ -11,7 +11,7 @@ from vllm.utils import random_uuid
 from roll.distributed.scheduler.resource_manager import ResourceManager
 from roll.third_party.vllm import create_async_llm
 from roll.utils.checkpoint_manager import download_model
-from utils import chat_prompts, print_request_output
+from tests.third_party.vllm.utils import chat_prompts, print_request_output
 
 
 # vLLM 0.8.4 has bug when using n_sample with output_kind other than RequestOutputKind.FINAL_ONLY

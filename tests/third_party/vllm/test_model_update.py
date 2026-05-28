@@ -12,7 +12,10 @@ from roll.third_party.vllm import create_async_llm
 from roll.third_party.vllm.worker import WorkerV1
 from roll.utils import checkpoint_manager
 from roll.utils.checkpoint_manager import download_model
-from utils import generate_batch, chat_prompts, print_request_output
+try:
+    from .utils import generate_batch, chat_prompts, print_request_output
+except ImportError:
+    from utils import generate_batch, chat_prompts, print_request_output
 
 class ModelUpdateWorker(WorkerV1):
     def __init__(self, *args, **kwargs):

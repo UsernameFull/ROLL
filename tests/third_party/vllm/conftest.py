@@ -9,7 +9,6 @@ if _THIS_DIR not in sys.path:
 
 if os.environ.get("ROLL_NPU_CI") == "1":
     collect_ignore = [
-        "test_abort.py",
         "test_add_requests.py",
         "test_collective_rpc.py",
         "test_fp8.py",

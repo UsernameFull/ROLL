@@ -14,7 +14,7 @@ from roll.platforms import current_platform
 from roll.third_party.vllm import create_async_llm
 from roll.utils import checkpoint_manager
 from roll.utils.checkpoint_manager import download_model
-from tests.third_party.vllm.utils import (
+from utils import (
     chat_prompts,
     generate_batch,
     print_request_output,

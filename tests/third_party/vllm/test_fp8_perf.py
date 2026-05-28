@@ -9,7 +9,7 @@ from vllm import SamplingParams
 from roll.distributed.scheduler.resource_manager import ResourceManager
 from roll.third_party.vllm import create_async_llm
 from roll.utils.checkpoint_manager import download_model
-from tests.third_party.vllm.utils import generate_batch, chat_format
+from utils import generate_batch, chat_format
 
 
 def print_speed_metrics(outputs, start_time):

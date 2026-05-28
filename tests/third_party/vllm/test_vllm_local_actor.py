@@ -10,7 +10,7 @@ from vllm import SamplingParams
 
 from roll.distributed.scheduler.resource_manager import ResourceManager
 from roll.third_party.vllm import create_async_llm
-from tests.third_party.vllm.utils import chat_prompts, generate_batch
+from utils import chat_prompts, generate_batch
 
 
 model_path = "Qwen/Qwen2.5-7B-Instruct"

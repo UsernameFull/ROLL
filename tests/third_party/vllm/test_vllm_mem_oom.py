@@ -7,7 +7,7 @@ from roll.distributed.scheduler.resource_manager import ResourceManager
 from roll.third_party.vllm import create_async_llm
 from roll.utils.context_managers import cpu_memory_info
 from roll.utils.logging import get_logger
-from tests.third_party.vllm.utils import generate_batch, chat_prompts
+from utils import generate_batch, chat_prompts
 
 logger = get_logger()
 

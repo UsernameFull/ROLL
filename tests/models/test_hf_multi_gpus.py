@@ -30,6 +30,8 @@ data_args: DataArguments = DataArguments(
     prompt="instruction",
 )
 
+# This generate/offload smoke test takes too long in NPU CI.
+@pytest.mark.skip_on_npu
 def test_hf_multi_gpus_cpu_offload_with_hook():
     dataloader, tokenizer = get_mock_dataloader(model_args=model_args, data_args=data_args, batch_size=4)
     model = default_actor_model_provider(tokenizer, model_args, TrainingArguments(),  False)

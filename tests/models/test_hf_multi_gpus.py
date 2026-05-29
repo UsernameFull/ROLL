@@ -30,7 +30,7 @@ data_args: DataArguments = DataArguments(
     prompt="instruction",
 )
 
-@pytest.mark.skipif(current_platform.is_npu(), reason="accelerate.cpu_offload_with_hook requires CUDA")
+# @pytest.mark.skipif(current_platform.is_npu(), reason="accelerate.cpu_offload_with_hook requires CUDA")
 def test_hf_multi_gpus_cpu_offload_with_hook():
     dataloader, tokenizer = get_mock_dataloader(model_args=model_args, data_args=data_args, batch_size=4)
     model = default_actor_model_provider(tokenizer, model_args, TrainingArguments(),  False)
@@ -73,7 +73,7 @@ def test_hf_multi_gpus_cpu_offload_with_hook():
         print(output_str)
 
 
-@pytest.mark.skipif(current_platform.is_npu(), reason="multi-GPU HF offload test assumes CUDA device maps")
+# @pytest.mark.skipif(current_platform.is_npu(), reason="multi-GPU HF offload test assumes CUDA device maps")
 def test_hf_multi_gpus_cpu_offload_hf_device_map():
     dataloader, tokenizer = get_mock_dataloader(model_args=model_args, data_args=data_args, batch_size=4)
     model = default_actor_model_provider(tokenizer, model_args, TrainingArguments(), False)

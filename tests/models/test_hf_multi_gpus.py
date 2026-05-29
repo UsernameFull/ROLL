@@ -30,7 +30,6 @@ data_args: DataArguments = DataArguments(
     prompt="instruction",
 )
 
-# @pytest.mark.skipif(current_platform.is_npu(), reason="accelerate.cpu_offload_with_hook requires CUDA")
 def test_hf_multi_gpus_cpu_offload_with_hook():
     dataloader, tokenizer = get_mock_dataloader(model_args=model_args, data_args=data_args, batch_size=4)
     model = default_actor_model_provider(tokenizer, model_args, TrainingArguments(),  False)
@@ -51,11 +50,11 @@ def test_hf_multi_gpus_cpu_offload_with_hook():
             pad_token_id=tokenizer.pad_token_id,
         )
 
-        print(f"before offload, hf_device_map: {model.hf_device_map}")
+        print(f"before offload, hf_device_map: {getattr(model, 'hf_device_map', None)}")
 
         if not hook:
             model, hook = cpu_offload_with_hook(model)
-        print(f"after offload, hf_device_map: {model.hf_device_map}")
+        print(f"after offload, hf_device_map: {getattr(model, 'hf_device_map', None)}")
         print(f"after offload: {i}")
         input_device = get_model_input_device(model)
         input_ids = input_ids.to(input_device)
@@ -73,7 +72,6 @@ def test_hf_multi_gpus_cpu_offload_with_hook():
         print(output_str)
 
 
-# @pytest.mark.skipif(current_platform.is_npu(), reason="multi-GPU HF offload test assumes CUDA device maps")
 def test_hf_multi_gpus_cpu_offload_hf_device_map():
     dataloader, tokenizer = get_mock_dataloader(model_args=model_args, data_args=data_args, batch_size=4)
     model = default_actor_model_provider(tokenizer, model_args, TrainingArguments(), False)
@@ -94,11 +92,11 @@ def test_hf_multi_gpus_cpu_offload_hf_device_map():
             pad_token_id=tokenizer.pad_token_id,
         )
 
-        print(f"before offload, hf_device_map: {model.hf_device_map}")
+        print(f"before offload, hf_device_map: {getattr(model, 'hf_device_map', None)}")
 
         offload_hf_model(model=model)
 
-        print(f"after offload, hf_device_map: {model.hf_device_map}")
+        print(f"after offload, hf_device_map: {getattr(model, 'hf_device_map', None)}")
         print(f"after offload: {i}")
         load_hf_model(model=model)
 

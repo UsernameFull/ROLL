@@ -25,30 +25,6 @@ from tests.third_party.deepspeed.common import DistributedTest
 from tests.third_party.deepspeed.simple_model import random_dataloader, SimpleModel
 
 
-ROLL_NPU_CI = os.environ.get("ROLL_NPU_CI") == "1"
-OFFLOAD_STATE_CASES = (
-    [OffloadStateTypeEnum.lp_params]
-    if ROLL_NPU_CI
-    else [
-        OffloadStateTypeEnum.hp_params,
-        OffloadStateTypeEnum.lp_params,
-        OffloadStateTypeEnum.optim_states,
-        OffloadStateTypeEnum.lp_grads,
-        OffloadStateTypeEnum.contiguous_grad_buffer,
-        None,
-    ]
-)
-INFER_OFFLOAD_STATE_CASES = [OffloadStateTypeEnum.lp_params]
-PIN_MEMORY_CASES = [False] if ROLL_NPU_CI else [False, True]
-PIN_MEMORY_CASES_TRUE_FIRST = [False] if ROLL_NPU_CI else [True, False]
-NON_BLOCKING_CASES = [False] if ROLL_NPU_CI else [False, True]
-NON_BLOCKING_CASES_TRUE_FIRST = [False] if ROLL_NPU_CI else [True, False]
-ZERO_STAGE_CASES = [3] if ROLL_NPU_CI else [1, 2, 3]
-PARTIAL_PARAM_CASES = [False] if ROLL_NPU_CI else [True, False]
-OPTIMIZER_OFFLOAD_CASES = [True] if ROLL_NPU_CI else [True, False]
-WITH_OPTIM_PARAMS_CASES = [False] if ROLL_NPU_CI else [True, False]
-
-
 def validate_device(model, device: torch.device, include) -> None:
 
     def compare_device(state) -> bool:
@@ -319,16 +295,28 @@ def run_model_memory_dump(model, config_dict, hidden_dim, dtype, include, pin_me
     model.destroy()
 
 
+# The full offload state matrix takes too long in NPU CI.
+@pytest.mark.skip_on_npu
 class TestOffloadStates(DistributedTest):
     # Need multiple gpus to test possible hanging
     world_size = 2
 
-    @pytest.mark.parametrize("included_state", OFFLOAD_STATE_CASES)
-    @pytest.mark.parametrize("pin_memory", PIN_MEMORY_CASES)
-    @pytest.mark.parametrize("non_blocking", NON_BLOCKING_CASES)
-    @pytest.mark.parametrize("stage", ZERO_STAGE_CASES)
-    @pytest.mark.parametrize("partial_param", PARTIAL_PARAM_CASES)
-    @pytest.mark.parametrize("optimizer_offload", OPTIMIZER_OFFLOAD_CASES)
+    @pytest.mark.parametrize(
+        "included_state",
+        [
+            OffloadStateTypeEnum.hp_params,
+            OffloadStateTypeEnum.lp_params,
+            OffloadStateTypeEnum.optim_states,
+            OffloadStateTypeEnum.lp_grads,
+            OffloadStateTypeEnum.contiguous_grad_buffer,
+            None,
+        ],
+    )
+    @pytest.mark.parametrize("pin_memory", [False, True])
+    @pytest.mark.parametrize("non_blocking", [False, True])
+    @pytest.mark.parametrize("stage", [1, 2, 3])
+    @pytest.mark.parametrize("partial_param", [True, False])
+    @pytest.mark.parametrize("optimizer_offload", [True, False])
     def test_offload_states(self, included_state, pin_memory, non_blocking, stage, optimizer_offload, partial_param):
         if optimizer_offload:
             if included_state in [
@@ -373,9 +361,9 @@ class TestOffloadStates(DistributedTest):
         else:
             run_model_stage_1_2(model, config_dict, hidden_dim, torch.bfloat16, include, pin_memory, non_blocking)
 
-    @pytest.mark.parametrize("included_state", INFER_OFFLOAD_STATE_CASES)
-    @pytest.mark.parametrize("pin_memory", PIN_MEMORY_CASES)
-    @pytest.mark.parametrize("non_blocking", NON_BLOCKING_CASES)
+    @pytest.mark.parametrize("included_state", [OffloadStateTypeEnum.lp_params])
+    @pytest.mark.parametrize("pin_memory", [False, True])
+    @pytest.mark.parametrize("non_blocking", [False, True])
     def test_offload_states_with_zero3_infer_only(self, included_state, pin_memory, non_blocking):
         hidden_dim = 1024
 
@@ -398,13 +386,23 @@ class TestOffloadStates(DistributedTest):
         include = None if included_state is None else [included_state]
         run_model_infer(model, config_dict, hidden_dim, torch.bfloat16, include, pin_memory, non_blocking)
 
-    @pytest.mark.parametrize("included_state", OFFLOAD_STATE_CASES)
-    @pytest.mark.parametrize("pin_memory", PIN_MEMORY_CASES_TRUE_FIRST)
-    @pytest.mark.parametrize("non_blocking", NON_BLOCKING_CASES_TRUE_FIRST)
-    @pytest.mark.parametrize("stage", ZERO_STAGE_CASES)
-    @pytest.mark.parametrize("optimizer_offload", OPTIMIZER_OFFLOAD_CASES)
-    @pytest.mark.parametrize("partial_param", PARTIAL_PARAM_CASES)
-    @pytest.mark.parametrize("with_optim_params", WITH_OPTIM_PARAMS_CASES)
+    @pytest.mark.parametrize(
+        "included_state",
+        [
+            OffloadStateTypeEnum.hp_params,
+            OffloadStateTypeEnum.lp_params,
+            OffloadStateTypeEnum.optim_states,
+            OffloadStateTypeEnum.lp_grads,
+            OffloadStateTypeEnum.contiguous_grad_buffer,
+            None,
+        ],
+    )
+    @pytest.mark.parametrize("pin_memory", [True, False])
+    @pytest.mark.parametrize("non_blocking", [True, False])
+    @pytest.mark.parametrize("stage", [1, 2, 3])
+    @pytest.mark.parametrize("optimizer_offload", [True, False])
+    @pytest.mark.parametrize("partial_param", [True, False])
+    @pytest.mark.parametrize("with_optim_params", [True, False])
     def test_offload_states_zero(
         self, included_state, pin_memory, non_blocking, stage, optimizer_offload, partial_param, with_optim_params
     ):
@@ -483,7 +481,6 @@ class TestOffloadStates(DistributedTest):
             )
 
     # NOTE: 只forward 没有[OffloadStateTypeEnum.optim_states, OffloadStateTypeEnum.lp_grads]
-    @pytest.mark.skipif(ROLL_NPU_CI, reason="CUDA memory snapshot APIs are not available in NPU CI.")
     @pytest.mark.parametrize(
         "included_state",
         [

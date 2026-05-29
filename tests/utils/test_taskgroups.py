@@ -3,12 +3,7 @@ import pytest
 
 from roll.utils.taskgroups import TaskGroup
 
-pytestmark = pytest.mark.anyio
-
-
-@pytest.fixture
-def anyio_backend():
-    return "asyncio"
+pytestmark = pytest.mark.asyncio
 
 
 async def test_base():

@@ -30,7 +30,7 @@ async def generate(client, url, payload):
     response = response if isinstance(response, list) else [response]
     return response
 
-async def test_sampling_n(
+async def _check_sampling_n(
     url,
     client: httpx.AsyncClient,
     input_ids,
@@ -51,7 +51,7 @@ async def test_sampling_n(
     assert all(resp["meta_info"]["finish_reason"]["type"] == "length" for resp in response)
     print(">>>>>>>>>>>>>>>>>>>>>>> TEST_sampling_n passed")
 
-async def test_abort_all(
+async def _check_abort_all(
     url,
     client: httpx.AsyncClient,
     input_ids,
@@ -98,7 +98,7 @@ async def test_abort_all(
     assert all(resp["meta_info"]["finish_reason"]["type"] == "abort" for response in responses for resp in response)
     print(">>>>>>>>>>>>>>>>>>>>>>> TEST_abort_all passed")
 
-async def test_abort(
+async def _check_abort(
     url,
     client: httpx.AsyncClient,
     input_ids,
@@ -215,9 +215,13 @@ async def main():
     response = await client.post(f"{worker_url}/resume_memory_occupation", json={})
     response.raise_for_status()
 
-    await test_sampling_n(url, client, input_ids)
-    await test_abort_all(url, client, input_ids, worker_url)
-    await test_abort(url, client, input_ids, worker_url)
+    await _check_sampling_n(url, client, input_ids)
+    await _check_abort_all(url, client, input_ids, worker_url)
+    await _check_abort(url, client, input_ids, worker_url)
+
+
+def test_sglang_abort_http_suite():
+    asyncio.run(main())
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    test_sglang_abort_http_suite()

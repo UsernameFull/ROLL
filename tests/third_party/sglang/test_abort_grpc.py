@@ -31,7 +31,7 @@ async def generate(client, url, payload):
     response = response if isinstance(response, list) else [response]
     return response
 
-async def test_sampling_n_grpc(
+async def _check_sampling_n_grpc(
     url,
     client,
     stub,
@@ -60,7 +60,7 @@ async def test_sampling_n_grpc(
         assert response.complete.finish_reason == "length"
     print(">>>>>>>>>>>>>>>>>>>>>>> TEST_sampling_n_grpc passed")
 
-async def test_sampling_n(
+async def _check_sampling_n(
     url,
     client,
     stub,
@@ -81,7 +81,7 @@ async def test_sampling_n(
     assert all(resp["meta_info"]["finish_reason"]["type"] == "length" for resp in response)
     print(">>>>>>>>>>>>>>>>>>>>>>> TEST_sampling_n passed")
 
-async def test_abort_all(
+async def _check_abort_all(
     url,
     client, 
     stub,
@@ -130,7 +130,7 @@ async def test_abort_all(
                 assert finish_reason in ["abort", "length", "stop"]
     print(">>>>>>>>>>>>>>>>>>>>>>> TEST_abort_all passed")
 
-async def test_abort(
+async def _check_abort(
     url,
     client,
     stub,
@@ -245,10 +245,14 @@ async def main():
     url = f"http://{router_ip}:{router_port}"
     await wait_sglang_router_workflow(f"http://{router_ip}:{router_port}", [worker_url])
 
-    await test_sampling_n_grpc(url, client, stub, input_ids)
-    await test_sampling_n(url, client, stub, input_ids)
-    await test_abort_all(url, client, stub, input_ids, worker_url)
-    await test_abort(url, client, stub, input_ids, worker_url)
+    await _check_sampling_n_grpc(url, client, stub, input_ids)
+    await _check_sampling_n(url, client, stub, input_ids)
+    await _check_abort_all(url, client, stub, input_ids, worker_url)
+    await _check_abort(url, client, stub, input_ids, worker_url)
+
+
+def test_sglang_abort_grpc_suite():
+    asyncio.run(main())
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    test_sglang_abort_grpc_suite()

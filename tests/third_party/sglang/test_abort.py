@@ -131,7 +131,7 @@ async def _run_sglang_abort_suite():
     try:
         model = sglang_patch.engine.engine_module.Engine(
             model_path=model_path,
-            enable_memory_saver=True,
+            enable_memory_saver=False,  # CI skips torch-memory-saver; abort behavior does not need it.
             skip_tokenizer_init=False,  # to use min_new_tokens
             dtype="bfloat16",
             tp_size=1,

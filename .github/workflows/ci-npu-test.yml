@@ -206,8 +206,9 @@ jobs:
           set -eo pipefail
           export SGLANG_KERNEL_NPU_SRC="/tmp/sgl-kernel-npu"
           rm -rf "${SGLANG_KERNEL_NPU_SRC}"
-          git clone --depth 1 --branch "${SGLANG_KERNEL_NPU_BRANCH}" "${SGLANG_KERNEL_NPU_REPO}" "${SGLANG_KERNEL_NPU_SRC}"
+          git clone --depth 1 --branch "${SGLANG_KERNEL_NPU_BRANCH}" --recurse-submodules --shallow-submodules "${SGLANG_KERNEL_NPU_REPO}" "${SGLANG_KERNEL_NPU_SRC}"
           cd "${SGLANG_KERNEL_NPU_SRC}"
+          git submodule status --recursive
           python3 -m pip install pybind11 wheel
           bash build.sh -a kernels
           python3 -m pip install output/sgl_kernel_npu*.whl

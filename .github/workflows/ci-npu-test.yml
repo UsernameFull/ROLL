@@ -64,7 +64,7 @@ jobs:
                  tests/distributed/scheduler/test_protocol.py \
                  tests/distributed/scheduler/test_protocol_padding.py \
                  tests/distributed/scheduler/test_decorator.py \
-                 -v --timeout=300 -x
+                 -v --timeout=300 --durations=0 --durations-min=0 -x
         env:
           PYTHONPATH: ${{ github.workspace }}
           ROLL_RUN_EXTERNAL_AGENTIC_TESTS: "0"
@@ -308,7 +308,7 @@ jobs:
                             --ignore=tests/distributed/scheduler/test_initialize.py \
                             --ignore=tests/distributed/scheduler/test_resource_manager.py \
                             --ignore=tests/distributed/executor/test_ray_thread_actor_cuda_mem_leak.py \
-                            -v --timeout=600 -x
+                            -v --timeout=600 --durations=0 --durations-min=0 -x
         env:
           ROLL_NPU_CI: "1"
           DS_UNITTEST_TIMEOUT: "600"

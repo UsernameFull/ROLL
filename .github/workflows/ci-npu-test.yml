@@ -1,6 +1,7 @@
 name: Tests
 
 on:
+  workflow_dispatch:
   push:
     branches: [main, npu_ci]
     paths-ignore:
@@ -15,6 +16,9 @@ on:
       - "**/*.md"
       - ".github/workflows/deploy.yml"
       - ".github/workflows/daily-stats.yml"
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -78,7 +82,7 @@ jobs:
     timeout-minutes: 120
     container:
       # Pre-built NPU docker image (built from docker/Dockerfile.A3) with all deps pre-installed
-      image: quay.io/ascend/vllm-ascend:main-a3
+      image: quay.io/ascend/vllm-ascend:v0.18.0-a3
     env:
       PIP_CACHE_DIR: ${{ github.workspace }}/.pip-cache
       PIP_INDEX_URL: https://repo.huaweicloud.com/repository/pypi/simple
@@ -268,8 +272,7 @@ jobs:
 
       - name: Install ROLL
         run: |
-          pip install -e ./mcore_adapter
-          pip install -e .
+          python3 -m pip install -e .
 
       - name: Show vLLM Ascend info
         run: |

@@ -195,6 +195,8 @@ async def _run_vllm_abort_suite():
             os.environ["VLLM_ASCEND_ENABLE_NZ"] = old_vllm_ascend_enable_nz
 
 
+# Takes about 7 minutes in NPU CI, so skip this full vLLM abort suite there.
+@pytest.mark.skip_on_npu
 def test_vllm_abort_suite():
     asyncio.run(_run_vllm_abort_suite())
 

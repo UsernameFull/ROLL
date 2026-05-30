@@ -3,6 +3,7 @@ import random
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import ray
+import pytest
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from roll.distributed.scheduler.rollout_scheduler import (
@@ -263,6 +264,8 @@ async def _run_GroupQueueManager():
     await async_test_GroupQueueManager(64, 1)
 
 
+# Takes about 10 minutes in NPU CI, so skip this full queue-manager matrix there.
+@pytest.mark.skip_on_npu
 def test_GroupQueueManager():
     asyncio.run(_run_GroupQueueManager())
 

@@ -145,7 +145,6 @@ class McaModelCreator:
             tokenizer=self.tokenizer,
             training_args=self.megatron_train_args,
             model_args=self.model_args,
-            is_trainable=True,
         )
         for module in self.model.get_models():
             module.requires_grad_(False)
@@ -158,8 +157,14 @@ class McaModelCreator:
 
         self.tokenizer = default_tokenizer_provider(model_args=self.model_args)
         self.model = default_actor_model_provider(
-            tokenizer=self.tokenizer, training_args=self.megatron_train_args, model_args=self.model_args
+            tokenizer=self.tokenizer,
+            training_args=self.megatron_train_args,
+            model_args=self.model_args,
+            is_trainable=True,
         )
+        for module in self.model.get_models():
+            module.train()
+            module.requires_grad_(True)
 
         ddp_config = DistributedDataParallelConfig(
             grad_reduce_in_fp32=self.megatron_train_args.accumulate_allreduce_grads_in_fp32,

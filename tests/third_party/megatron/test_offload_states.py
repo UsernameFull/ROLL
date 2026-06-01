@@ -273,7 +273,7 @@ def check_devices(tensors: List[torch.Tensor], target_device) -> None:
 
 def check_tensors(expected_tensors: List[torch.Tensor], tensors: List[torch.Tensor]) -> None:
     for tensor_expected, tensor_restored in zip(expected_tensors, tensors):
-        assert torch.equal(tensor_expected, tensor_restored)
+        assert torch.equal(tensor_expected.to(tensor_restored.device), tensor_restored)
 
 
 def current_device():

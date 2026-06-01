@@ -12,7 +12,7 @@ on:
         required: false
         default: "core_r0.16.0"
   push:
-    branches: [main, npu_ci]
+    branches: [main, npu_mindspeed_ci]
     paths:
       - ".github/workflows/ci-npu-mindspeed.yml"
       - "mcore_adapter/**"

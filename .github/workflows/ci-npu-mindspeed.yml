@@ -6,11 +6,11 @@ on:
       mindspeed_repo:
         description: "MindSpeed git repository"
         required: false
-        default: "https://gitee.com/ascend/MindSpeed.git"
+        default: "https://github.com/ascend/MindSpeed.git"
       mindspeed_ref:
         description: "MindSpeed branch, tag, or ref to install"
         required: false
-        default: "0.16_core"
+        default: "core_r0.16.0"
   push:
     branches: [main, npu_ci]
     paths:
@@ -59,9 +59,9 @@ jobs:
       VLLM_USE_V1: "1"
       VLLM_ASCEND_ENABLE_FLASHCOMM: "0"
       VLLM_ASCEND_ENABLE_NZ: "0"
-      MINDSPEED_REPO: ${{ github.event.inputs.mindspeed_repo || 'https://gitee.com/ascend/MindSpeed.git' }}
-      MINDSPEED_REF: ${{ github.event.inputs.mindspeed_ref || '0.16_core' }}
-      MINDSPEED_CACHE_KEY: "0.16-core"
+      MINDSPEED_REPO: ${{ github.event.inputs.mindspeed_repo || 'https://github.com/ascend/MindSpeed.git' }}
+      MINDSPEED_REF: ${{ github.event.inputs.mindspeed_ref || 'core_r0.16.0' }}
+      MINDSPEED_CACHE_KEY: "core-r0.16.0"
 
     steps:
       - name: Checkout code
@@ -155,17 +155,14 @@ jobs:
           python3 -m pip install -r requirements_common.txt
           python3 -m pip install deepspeed==0.16.4 tensorboard
 
-      - name: Install MindSpeed 0.16 core
+      - name: Install MindSpeed core_r0.16.0
         shell: bash
         run: |
           set -eo pipefail
           export MINDSPEED_SRC="/tmp/MindSpeed"
           rm -rf "${MINDSPEED_SRC}"
-          git init "${MINDSPEED_SRC}"
+          git clone --depth 1 --branch "${MINDSPEED_REF}" "${MINDSPEED_REPO}" "${MINDSPEED_SRC}"
           cd "${MINDSPEED_SRC}"
-          git remote add origin "${MINDSPEED_REPO}"
-          git fetch --depth 1 origin "${MINDSPEED_REF}"
-          git checkout --detach FETCH_HEAD
           git log -1 --oneline
           python3 -m pip install --no-build-isolation --no-deps -e .
 

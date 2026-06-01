@@ -209,9 +209,9 @@ jobs:
           print(f"npu_device_count={torch.npu.device_count()}")
           PY
 
-      - name: Run MindSpeed import and collection smoke
+      - name: Run MindSpeed Megatron offload tests
         run: |
           export PYTHONPATH="${GITHUB_WORKSPACE}:${PYTHONPATH:-}"
-          python3 -m pytest tests/third_party/megatron
+          torchrun --standalone --nnodes=1 --nproc-per-node=2 -m pytest -s tests/third_party/megatron/test_offload_states.py
         env:
           ROLL_NPU_CI: "1"

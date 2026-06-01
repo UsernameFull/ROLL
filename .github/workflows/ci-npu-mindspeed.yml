@@ -231,8 +231,24 @@ jobs:
           PY
 
       - name: Run MindSpeed Megatron offload tests
+        shell: bash
         run: |
+          set -o pipefail
           export PYTHONPATH="${GITHUB_WORKSPACE}:${PYTHONPATH:-}"
-          torchrun --standalone --nnodes=1 --nproc-per-node=2 -m pytest -s tests/third_party/megatron/test_offload_states.py
+          torchrun --standalone --nnodes=1 --nproc-per-node=2 -m pytest -s -vv --tb=short tests/third_party/megatron/test_offload_states.py 2>&1 | tee npu_mindspeed_pytest.log
+          status=${PIPESTATUS[0]}
+          if [ "${status}" -ne 0 ]; then
+            python3 - <<'PY'
+          from pathlib import Path
+
+          log_path = Path("npu_mindspeed_pytest.log")
+          lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+          tail = "\n".join(lines[-160:])
+          tail = tail[-8000:]
+          escaped = tail.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          print(f"::error title=MindSpeed pytest failure tail::{escaped}")
+          PY
+            exit "${status}"
+          fi
         env:
           ROLL_NPU_CI: "1"

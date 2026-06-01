@@ -4,6 +4,9 @@ from typing import Optional, List
 import pytest
 import torch
 
+if os.environ.get("ROLL_NPU_CI") == "1":
+    import mindspeed.megatron_adaptor  # noqa: F401
+
 from roll.platforms import current_platform
 from megatron.core import DistributedDataParallel
 from megatron.core.distributed import DistributedDataParallelConfig
@@ -258,12 +261,16 @@ def check_tensors(expected_tensors: List[torch.Tensor], tensors: List[torch.Tens
         assert torch.equal(tensor_expected, tensor_restored)
 
 
+def current_device():
+    return f"{current_platform.device_type}:{current_platform.current_device()}"
+
+
 def run_model_infer(mca_model: McaModelCreator, included_state, pin_memory, non_blocking):
     with torch.no_grad():
         for batch in mca_model.data_loader:
             input_ids, attention_mask = batch
-            input_ids = input_ids.to("cuda")
-            attention_mask = attention_mask.to("cuda")
+            input_ids = input_ids.to(current_device())
+            attention_mask = attention_mask.to(current_device())
             position_ids = torch.clip(torch.cumsum(attention_mask, dim=-1) - 1, min=0, max=None)
 
             models = mca_model.model.get_models()
@@ -301,8 +308,8 @@ def run_model_dist_optimizer(mca_model: McaModelCreator, included_state, pin_mem
 
     for batch in mca_model.data_loader:
         input_ids, attention_mask = batch
-        input_ids = input_ids.to("cuda")
-        attention_mask = attention_mask.to("cuda")
+        input_ids = input_ids.to(current_device())
+        attention_mask = attention_mask.to(current_device())
         position_ids = torch.clip(torch.cumsum(attention_mask, dim=-1) - 1, min=0, max=None)
 
         models = mca_model.model.get_models()
@@ -506,8 +513,8 @@ def run_model_fp16_optimizer(mca_model: McaModelCreator, included_state, pin_mem
 
     for batch in mca_model.data_loader:
         input_ids, attention_mask = batch
-        input_ids = input_ids.to("cuda")
-        attention_mask = attention_mask.to("cuda")
+        input_ids = input_ids.to(current_device())
+        attention_mask = attention_mask.to(current_device())
         position_ids = torch.clip(torch.cumsum(attention_mask, dim=-1) - 1, min=0, max=None)
 
         models = mca_model.model.get_models()
@@ -682,8 +689,8 @@ def run_model_fp32_optimizer(mca_model: McaModelCreator, included_state, pin_mem
 
     for batch in mca_model.data_loader:
         input_ids, attention_mask = batch
-        input_ids = input_ids.to("cuda")
-        attention_mask = attention_mask.to("cuda")
+        input_ids = input_ids.to(current_device())
+        attention_mask = attention_mask.to(current_device())
         position_ids = torch.clip(torch.cumsum(attention_mask, dim=-1) - 1, min=0, max=None)
 
         models = mca_model.model.get_models()

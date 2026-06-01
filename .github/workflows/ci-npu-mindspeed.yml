@@ -150,10 +150,14 @@ jobs:
 
       - name: Install ROLL requirements
         run: |
-          python3 -m pip install --upgrade pip setuptools wheel
+          python3 -m pip install --upgrade pip wheel
+          # torchair still imports pkg_resources; setuptools 82 removed it.
+          python3 -m pip install "setuptools<82"
           python3 -m pip install pytest-timeout
           python3 -m pip install -r requirements_common.txt
           python3 -m pip install deepspeed==0.16.4 tensorboard
+          python3 -m pip install "setuptools<82"
+          python3 -c "import pkg_resources; print('pkg_resources=available')"
 
       - name: Install MindSpeed core_r0.16.0
         shell: bash

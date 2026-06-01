@@ -53,6 +53,7 @@ class McaModelCreator:
                 tensor_model_parallel_size=1,
                 pipeline_model_parallel_size=1,
                 expert_model_parallel_size=1,
+                additional_configs={"qk_layernorm": False},
             )
             self.model_args = ModelArguments(model_name_or_path=self.model_name, attn_implementation="fa2", dtype="bf16")
             self.create_model = self.create_mca_infer_only
@@ -64,6 +65,7 @@ class McaModelCreator:
                 tensor_model_parallel_size=1,
                 pipeline_model_parallel_size=1,
                 expert_model_parallel_size=1,
+                additional_configs={"qk_layernorm": False},
             )
             self.model_args = ModelArguments(model_name_or_path=self.model_name, attn_implementation="fa2", dtype="bf16")
             self.create_model = self.create_mca_model
@@ -75,6 +77,7 @@ class McaModelCreator:
                 tensor_model_parallel_size=1,
                 pipeline_model_parallel_size=1,
                 expert_model_parallel_size=1,
+                additional_configs={"qk_layernorm": False},
             )
             self.model_args = ModelArguments(model_name_or_path=self.model_name, attn_implementation="fa2", dtype="bf16")
             self.create_model = self.create_mca_model
@@ -86,6 +89,7 @@ class McaModelCreator:
                 tensor_model_parallel_size=1,
                 pipeline_model_parallel_size=1,
                 expert_model_parallel_size=1,
+                additional_configs={"qk_layernorm": False},
             )
             self.model_args = ModelArguments(model_name_or_path=self.model_name, attn_implementation="fa2", dtype="fp32")
             self.create_model = self.create_mca_model

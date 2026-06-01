@@ -155,6 +155,7 @@ jobs:
           python3 -m pip install "setuptools<82"
           python3 -m pip install pytest-timeout
           python3 -m pip install -r requirements_common.txt
+          python3 -m pip install --no-build-isolation --no-deps -e ./mcore_adapter
           python3 -m pip install deepspeed==0.16.4 tensorboard
           python3 -m pip install "setuptools<82"
           python3 -c "import pkg_resources; print('pkg_resources=available')"
@@ -214,6 +215,7 @@ jobs:
 
           packages = (
               "mindspeed",
+              "mcore_adapter",
               "megatron-core",
               "vllm-ascend",
               "torch",
@@ -225,6 +227,9 @@ jobs:
               print(f"{package_name}={package_version(package_name)}")
 
           print(f"mindspeed_path={mindspeed.__path__}")
+          import mcore_adapter
+
+          print(f"mcore_adapter_path={mcore_adapter.__path__}")
           print(f"vllm={vllm.__version__}")
           print(f"platform={current_platform.device_type}")
           print(f"npu_device_count={torch.npu.device_count()}")

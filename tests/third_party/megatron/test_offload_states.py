@@ -3,7 +3,6 @@ from typing import Optional, List
 
 import pytest
 import torch
-import torch.distributed as dist
 
 from roll.platforms import current_platform
 from megatron.core import DistributedDataParallel
@@ -224,64 +223,24 @@ torchrun --standalone --nnodes=1 --nproc-per-node=2 -m pytest -s tests/third_par
 """
 
 
-def test_megatron_init_memory():
-    MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT: int = 100000
-    torch.cuda.memory._record_memory_history(
-        max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT,
-    )
-
+def test_megatron_dist_optimizer_offload_reload_smoke():
     mca_model = McaModelCreator(optimizer_type="dist_optimizer")
-
-    # buffer_data = []
-    # for buffer in mca_model.optimizer.buffers:
-    #     buffer_data.append(buffer.param_data.data.storage().data_ptr())
-
-    mca_model.optimizer.offload_states(include=[MegatronOffloadStateType.other_params], pin_memory=True)
-
-    t0 = torch.randint(0, 100, (1024, 1024, 1024), device="cuda")
-    del t0
-
-    mca_model.optimizer.reload_states(include=[MegatronOffloadStateType.model_params])
-    if dist.get_rank() == 0:
-        t0 = torch.randint(0, 100, (1024, 1024, 1024), device="cuda")
-        dump_file = f"./memory_dump/snapshot_megatron_init_offload_{os.environ['RANK']}.pickle"
-        os.makedirs(os.path.dirname(dump_file), exist_ok=True)
-        torch.cuda.memory._dump_snapshot(dump_file)
-        torch.cuda.memory._record_memory_history(enabled=None)
-
-    # tensors_group_by_data_ptr = defaultdict(list)
-    # tensors = objgraph.by_type('Tensor')
-    # print(f"len(tensor)={len(tensors)}")
-    # for tensor in tensors:
-    #     tensors_group_by_data_ptr[tensor.storage().data_ptr()].append(tensor)
-    #
-    # for buffer in buffer_data:
-    #     objgraph.show_backrefs(tensors_group_by_data_ptr[buffer], max_depth=10,
-    #                            extra_ignore=[id(locals())],
-    #                            filename=f'/checkpoint/binary/ScaleAligner/memory_dump/buffer_data_group_tensors.param_data_{datetime.now().strftime("%Y%m%d-%H%M%S")}.png')
-
-
-def test_megatron_init_ddp_memory():
-    MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT: int = 100000
-    torch.cuda.memory._record_memory_history(
-        max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT,
+    run_model_dist_optimizer(
+        mca_model,
+        included_state=[MegatronOffloadStateType.other_params],
+        pin_memory=True,
+        non_blocking=True,
     )
 
+
+def test_megatron_no_grad_module_offload_reload_smoke():
     mca_model = McaModelCreator(optimizer_type=None)
-
-    offload_megatron_no_grad_module(model_chunks=mca_model.model.get_models())
-
-    t0 = torch.randint(0, 100, (1024, 1024, 1024), device="cuda")
-    del t0
-
-    reload_megatron_no_grad_module(model_chunks=mca_model.model.get_models())
-
-    if dist.get_rank() == 0:
-        t0 = torch.randint(0, 100, (1024, 1024, 1024), device="cuda")
-        dump_file = f"./memory_dump/snapshot_megatron_init_ddp_offload_{os.environ['RANK']}.pickle"
-        os.makedirs(os.path.dirname(dump_file), exist_ok=True)
-        torch.cuda.memory._dump_snapshot(dump_file)
-        torch.cuda.memory._record_memory_history(enabled=None)
+    run_model_infer(
+        mca_model,
+        included_state=[MegatronOffloadStateType.model_params],
+        pin_memory=True,
+        non_blocking=True,
+    )
 
 
 def check_devices(tensors: List[torch.Tensor], target_device) -> None:

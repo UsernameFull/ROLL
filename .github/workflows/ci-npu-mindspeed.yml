@@ -243,10 +243,21 @@ jobs:
           from pathlib import Path
 
           log_path = Path("npu_mindspeed_pytest.log")
-          lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-          tail = "\n".join(lines[-160:])
-          tail = tail[-8000:]
-          escaped = tail.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          text = log_path.read_text(encoding="utf-8", errors="replace")
+          sections = []
+          for marker in (
+              "=================================== FAILURES ===================================",
+              "=========================== short test summary info ============================",
+          ):
+              index = text.find(marker)
+              if index != -1:
+                  sections.append(text[index : index + 5000])
+          if not sections:
+              lines = text.splitlines()
+              sections.append("\n".join(lines[-120:]))
+          payload = "\n\n".join(sections)
+          payload = payload[-8000:]
+          escaped = payload.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
           print(f"::error title=MindSpeed pytest failure tail::{escaped}")
           PY
             exit "${status}"

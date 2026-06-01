@@ -142,7 +142,10 @@ class McaModelCreator:
 
         self.tokenizer = default_tokenizer_provider(model_args=self.model_args)
         self.model = default_actor_model_provider(
-            tokenizer=self.tokenizer, training_args=self.megatron_train_args, model_args=self.model_args
+            tokenizer=self.tokenizer,
+            training_args=self.megatron_train_args,
+            model_args=self.model_args,
+            is_trainable=True,
         )
         for module in self.model.get_models():
             module.requires_grad_(False)
@@ -272,13 +275,25 @@ def current_device():
     return f"{current_platform.device_type}:{current_platform.current_device()}"
 
 
+def prepare_model_batch(batch):
+    input_ids, token_attention_mask = batch
+    input_ids = input_ids.to(current_device())
+    token_attention_mask = token_attention_mask.to(current_device())
+    position_ids = torch.clip(torch.cumsum(token_attention_mask, dim=-1) - 1, min=0, max=None)
+    seq_length = input_ids.size(1)
+    causal_mask = torch.triu(
+        torch.ones((1, 1, seq_length, seq_length), dtype=torch.bool, device=input_ids.device),
+        diagonal=1,
+    )
+    padding_mask = token_attention_mask[:, None, None, :].eq(0)
+    attention_mask = causal_mask | padding_mask
+    return input_ids, attention_mask, position_ids
+
+
 def run_model_infer(mca_model: McaModelCreator, included_state, pin_memory, non_blocking):
     with torch.no_grad():
         for batch in mca_model.data_loader:
-            input_ids, attention_mask = batch
-            input_ids = input_ids.to(current_device())
-            attention_mask = attention_mask.to(current_device())
-            position_ids = torch.clip(torch.cumsum(attention_mask, dim=-1) - 1, min=0, max=None)
+            input_ids, attention_mask, position_ids = prepare_model_batch(batch)
 
             models = mca_model.model.get_models()
             for model in models:
@@ -314,10 +329,7 @@ def run_model_dist_optimizer(mca_model: McaModelCreator, included_state, pin_mem
     assert isinstance(mca_model.optimizer, DistributedOptimizer)
 
     for batch in mca_model.data_loader:
-        input_ids, attention_mask = batch
-        input_ids = input_ids.to(current_device())
-        attention_mask = attention_mask.to(current_device())
-        position_ids = torch.clip(torch.cumsum(attention_mask, dim=-1) - 1, min=0, max=None)
+        input_ids, attention_mask, position_ids = prepare_model_batch(batch)
 
         models = mca_model.model.get_models()
         for model in models:
@@ -519,10 +531,7 @@ def run_model_fp16_optimizer(mca_model: McaModelCreator, included_state, pin_mem
     assert isinstance(mca_model.optimizer, Float16OptimizerWithFloat16Params)
 
     for batch in mca_model.data_loader:
-        input_ids, attention_mask = batch
-        input_ids = input_ids.to(current_device())
-        attention_mask = attention_mask.to(current_device())
-        position_ids = torch.clip(torch.cumsum(attention_mask, dim=-1) - 1, min=0, max=None)
+        input_ids, attention_mask, position_ids = prepare_model_batch(batch)
 
         models = mca_model.model.get_models()
         for model in models:
@@ -695,10 +704,7 @@ def run_model_fp32_optimizer(mca_model: McaModelCreator, included_state, pin_mem
     assert isinstance(mca_model.optimizer, FP32Optimizer)
 
     for batch in mca_model.data_loader:
-        input_ids, attention_mask = batch
-        input_ids = input_ids.to(current_device())
-        attention_mask = attention_mask.to(current_device())
-        position_ids = torch.clip(torch.cumsum(attention_mask, dim=-1) - 1, min=0, max=None)
+        input_ids, attention_mask, position_ids = prepare_model_batch(batch)
 
         models = mca_model.model.get_models()
         for model in models:

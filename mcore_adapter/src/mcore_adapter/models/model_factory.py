@@ -412,7 +412,7 @@ class McaGPTModel(GPTModel, PretrainedModel):
                     _replace_with_rmsnorm(module_spec.submodules, "input_layernorm")
                     _replace_with_rmsnorm(module_spec.submodules, "pre_mlp_layernorm")
                     self_attn = module_spec.submodules.self_attention
-                    if hasattr(self_attn, "submodules"):
+                    if config.qk_layernorm and hasattr(self_attn, "submodules"):
                         _replace_with_rmsnorm(self_attn.submodules, "q_layernorm")
                         _replace_with_rmsnorm(self_attn.submodules, "k_layernorm")
                 else:

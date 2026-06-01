@@ -34,10 +34,18 @@ from roll.third_party.megatron.offload_states_patch import (
 from roll.third_party.megatron.optimizer import get_megatron_optimizer
 
 
+def _default_model_name():
+    local_model = "/data/cpfs_0/common/models/Qwen2.5-0.5B-Instruct"
+    return os.environ.get(
+        "ROLL_MEGATRON_TEST_MODEL",
+        local_model if os.path.isdir(local_model) else "Qwen/Qwen2.5-0.5B-Instruct",
+    )
+
+
 class McaModelCreator:
 
     def __init__(self, optimizer_type, model_name=None):
-        self.model_name = model_name or os.environ.get("ROLL_MEGATRON_TEST_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
+        self.model_name = model_name or _default_model_name()
         if optimizer_type is None:
             self.megatron_train_args = TrainingArguments(
                 output_dir="./output",

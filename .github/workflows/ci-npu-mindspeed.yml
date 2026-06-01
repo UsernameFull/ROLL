@@ -175,7 +175,16 @@ jobs:
           python3 -m pip install -e .
 
       - name: Prepare Megatron test model
+        shell: bash
         run: |
+          set -eo pipefail
+          local_model="/data/cpfs_0/common/models/Qwen2.5-0.5B-Instruct"
+          if [ -d "${local_model}" ]; then
+            echo "ROLL_MEGATRON_TEST_MODEL=${local_model}"
+            echo "ROLL_MEGATRON_TEST_MODEL=${local_model}" >> "${GITHUB_ENV}"
+            exit 0
+          fi
+
           python3 - <<'PY'
           import os
           from huggingface_hub import snapshot_download

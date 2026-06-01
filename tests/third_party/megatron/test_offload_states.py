@@ -4,9 +4,6 @@ from typing import Optional, List
 import pytest
 import torch
 
-if os.environ.get("ROLL_NPU_CI") == "1":
-    import mindspeed.megatron_adaptor  # noqa: F401
-
 from roll.platforms import current_platform
 from megatron.core import DistributedDataParallel
 from megatron.core.distributed import DistributedDataParallelConfig
@@ -34,6 +31,9 @@ from roll.third_party.megatron.offload_states_patch import (
     reload_megatron_no_grad_module,
 )
 from roll.third_party.megatron.optimizer import get_megatron_optimizer
+
+if os.environ.get("ROLL_NPU_CI") == "1":
+    import mindspeed.megatron_adaptor  # noqa: F401
 
 
 def _default_model_name():

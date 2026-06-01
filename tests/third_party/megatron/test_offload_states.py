@@ -202,26 +202,33 @@ class McaModelCreator:
         bind_megatron_offload_states_func(optimizer=self.optimizer)
 
         if not isinstance(self.optimizer, ChainedOptimizer):
-            self.scheduler = get_scheduler(
-                "cosine",
-                optimizer=self.optimizer if self.optimizer is None else self.optimizer.optimizer,
-                num_warmup_steps=self.megatron_train_args.get_warmup_steps(self.megatron_train_args.max_steps),
-                num_training_steps=self.megatron_train_args.max_steps,
-                scheduler_specific_kwargs=self.megatron_train_args.lr_scheduler_kwargs,
-            )
-        else:
-            lr_schedulers = []
-            for opt in self.optimizer.chained_optimizers:
-                sch = get_scheduler(
+            base_optimizer = self.optimizer if self.optimizer is None else self.optimizer.optimizer
+            if base_optimizer is not None:
+                self.scheduler = get_scheduler(
                     "cosine",
-                    optimizer=opt if opt is None else opt.optimizer,
+                    optimizer=base_optimizer,
                     num_warmup_steps=self.megatron_train_args.get_warmup_steps(self.megatron_train_args.max_steps),
                     num_training_steps=self.megatron_train_args.max_steps,
                     scheduler_specific_kwargs=self.megatron_train_args.lr_scheduler_kwargs,
                 )
-                lr_schedulers.append(sch)
+        else:
+            lr_schedulers = []
+            for opt in self.optimizer.chained_optimizers:
+                base_optimizer = opt if opt is None else opt.optimizer
+                if base_optimizer is None:
+                    continue
+                lr_schedulers.append(
+                    get_scheduler(
+                        "cosine",
+                        optimizer=base_optimizer,
+                        num_warmup_steps=self.megatron_train_args.get_warmup_steps(self.megatron_train_args.max_steps),
+                        num_training_steps=self.megatron_train_args.max_steps,
+                        scheduler_specific_kwargs=self.megatron_train_args.lr_scheduler_kwargs,
+                    )
+                )
 
-            self.scheduler = ChainedScheduler(lr_schedulers)
+            if lr_schedulers:
+                self.scheduler = ChainedScheduler(lr_schedulers)
 
 
 """

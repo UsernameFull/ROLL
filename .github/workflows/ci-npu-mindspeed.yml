@@ -151,16 +151,33 @@ jobs:
       - name: Install ROLL requirements
         shell: bash
         run: |
-          python3 -m pip install --upgrade pip wheel
-          # torchair still imports pkg_resources; setuptools 82 removed it.
-          python3 -m pip install "setuptools<82"
-          python3 -m pip install --retries 10 --timeout 120 pytest-timeout
-          grep -vE '^\s*\./mcore_adapter\s*$' requirements_common.txt > /tmp/requirements_common_no_mcore.txt
-          python3 -m pip install --retries 10 --timeout 120 -r /tmp/requirements_common_no_mcore.txt
-          python3 -m pip install --retries 10 --timeout 120 --no-build-isolation --no-deps -e ./mcore_adapter
-          python3 -m pip install --retries 10 --timeout 120 deepspeed==0.16.4 tensorboard
-          python3 -m pip install "setuptools<82"
-          python3 -c "import pkg_resources; print('pkg_resources=available')"
+          set +e
+          (
+            set -e
+            python3 -m pip install --upgrade pip wheel
+            # torchair still imports pkg_resources; setuptools 82 removed it.
+            python3 -m pip install "setuptools<82"
+            python3 -m pip install --retries 10 --timeout 120 pytest-timeout
+            grep -vE '^[[:space:]]*\./mcore_adapter[[:space:]]*$' requirements_common.txt > /tmp/requirements_common_no_mcore.txt
+            python3 -m pip install --retries 10 --timeout 120 -r /tmp/requirements_common_no_mcore.txt
+            python3 -m pip install --retries 10 --timeout 120 --no-build-isolation --no-deps -e ./mcore_adapter
+            python3 -m pip install --retries 10 --timeout 120 deepspeed==0.16.4 tensorboard
+            python3 -m pip install "setuptools<82"
+            python3 -c "import pkg_resources; print('pkg_resources=available')"
+          ) 2>&1 | tee npu_mindspeed_install.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "${status}" -ne 0 ]; then
+            python3 - <<'PY'
+          from pathlib import Path
+
+          text = Path("npu_mindspeed_install.log").read_text(encoding="utf-8", errors="replace")
+          payload = "\n".join(text.splitlines()[-160:])[-8000:]
+          escaped = payload.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          print(f"::error title=MindSpeed install failure tail::{escaped}")
+          PY
+            exit "${status}"
+          fi
 
       - name: Install MindSpeed core_r0.16.0
         shell: bash

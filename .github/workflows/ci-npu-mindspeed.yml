@@ -212,6 +212,6 @@ jobs:
       - name: Run MindSpeed import and collection smoke
         run: |
           export PYTHONPATH="${GITHUB_WORKSPACE}:${PYTHONPATH:-}"
-          python3 -m pytest tests/third_party/megatron --collect-only -q
+          python3 -m pytest tests/third_party/megatron
         env:
           ROLL_NPU_CI: "1"

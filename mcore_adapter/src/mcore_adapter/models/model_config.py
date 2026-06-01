@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Literal, Optional
 
@@ -377,6 +378,7 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
                 pipeline_model_parallel_size=self.pipeline_model_parallel_size,
             )
 
+        self._fill_mindspeed_feature_defaults()
         super().__post_init__()
         pipeline_size = self.pipeline_model_parallel_size
         if self.virtual_pipeline_model_parallel_size is not None:
@@ -392,6 +394,18 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
                 f" ({self.pipeline_model_parallel_size}) and virtual_pipeline_model_parallel_size "
                 f"({self.virtual_pipeline_model_parallel_size})."
             )
+
+    def _fill_mindspeed_feature_defaults(self):
+        if "mindspeed.megatron_adaptor" not in sys.modules:
+            return
+        try:
+            from mindspeed.args_utils import get_mindspeed_args
+        except ImportError:
+            return
+
+        for name, value in vars(get_mindspeed_args(get_defaults=True)).items():
+            if not hasattr(self, name):
+                setattr(self, name, value)
 
     def distribute_config_match(self, other: "McaModelConfig"):
         if not isinstance(other, McaModelConfig):

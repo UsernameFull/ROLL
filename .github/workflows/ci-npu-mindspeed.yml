@@ -23,7 +23,7 @@ on:
       - "setup.py"
       - "pyproject.toml"
   pull_request:
-    branches: [main, npu_ci]
+    branches: [main, npu_mindspeed_ci]
     paths:
       - ".github/workflows/ci-npu-mindspeed.yml"
       - "mcore_adapter/**"
@@ -212,6 +212,6 @@ jobs:
       - name: Run MindSpeed import and collection smoke
         run: |
           export PYTHONPATH="${GITHUB_WORKSPACE}:${PYTHONPATH:-}"
-          python3 -m pytest tests/third_party/megatron
+          python3 -m pytest tests/third_party/megatron --collect-only -q
         env:
           ROLL_NPU_CI: "1"

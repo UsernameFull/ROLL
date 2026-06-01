@@ -41,6 +41,7 @@ register_template(
         "add_qkv_bias": True,
         "hidden_dropout": 0.0,
         "rotary_percent": 1.0,
+        "qk_layernorm": False,
     },
     weight_converters=[
         RenameConverOp(hf_names="lm_head.weight", mca_names="output_layer.weight"),

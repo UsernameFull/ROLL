@@ -296,11 +296,6 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
             "choices": ["local", "transformer_engine"],
         },
     )
-    qk_layernorm: bool = field(
-        default=False,
-        metadata={"help": "Apply layernorm to query and key projections."},
-    )
-
     def __post_init__(self):
         if current_platform.is_npu() and self.transformer_impl == "transformer_engine":
             self.transformer_impl = "local"

@@ -39,6 +39,9 @@ shared_storage = None
 
 def model_path_cache(func):
     def wrapper(model_name_or_path: str, local_dir: Optional[str] = None):
+        if os.path.isdir(model_name_or_path):
+            return func(model_name_or_path, local_dir)
+
         node_ip = get_node_ip()
         global shared_storage
         if shared_storage is None:

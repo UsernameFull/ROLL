@@ -233,10 +233,11 @@ jobs:
       - name: Run MindSpeed Megatron offload tests
         shell: bash
         run: |
-          set -o pipefail
           export PYTHONPATH="${GITHUB_WORKSPACE}:${PYTHONPATH:-}"
+          set +e
           torchrun --standalone --nnodes=1 --nproc-per-node=2 -m pytest -s -vv --tb=short tests/third_party/megatron/test_offload_states.py 2>&1 | tee npu_mindspeed_pytest.log
           status=${PIPESTATUS[0]}
+          set -e
           if [ "${status}" -ne 0 ]; then
             python3 - <<'PY'
           from pathlib import Path

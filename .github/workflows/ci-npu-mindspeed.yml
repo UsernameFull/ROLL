@@ -149,14 +149,16 @@ jobs:
           npu-smi info
 
       - name: Install ROLL requirements
+        shell: bash
         run: |
           python3 -m pip install --upgrade pip wheel
           # torchair still imports pkg_resources; setuptools 82 removed it.
           python3 -m pip install "setuptools<82"
-          python3 -m pip install pytest-timeout
-          python3 -m pip install -r requirements_common.txt
-          python3 -m pip install --no-build-isolation --no-deps -e ./mcore_adapter
-          python3 -m pip install deepspeed==0.16.4 tensorboard
+          python3 -m pip install --retries 10 --timeout 120 pytest-timeout
+          grep -vE '^\s*\./mcore_adapter\s*$' requirements_common.txt > /tmp/requirements_common_no_mcore.txt
+          python3 -m pip install --retries 10 --timeout 120 -r /tmp/requirements_common_no_mcore.txt
+          python3 -m pip install --retries 10 --timeout 120 --no-build-isolation --no-deps -e ./mcore_adapter
+          python3 -m pip install --retries 10 --timeout 120 deepspeed==0.16.4 tensorboard
           python3 -m pip install "setuptools<82"
           python3 -c "import pkg_resources; print('pkg_resources=available')"
 

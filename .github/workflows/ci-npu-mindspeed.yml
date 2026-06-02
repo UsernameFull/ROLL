@@ -82,100 +82,67 @@ jobs:
       - name: Configure pip cache
         run: |
           mkdir -p "$PIP_CACHE_DIR"
-          python3 -m pip cache dir
 
       - name: Configure Ascend runtime
         shell: bash
         run: |
-          set -eo pipefail
-          if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then
-            source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          fi
-          if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then
-            source /usr/local/Ascend/nnal/atb/set_env.sh
-          fi
-
-          export ASCEND_HOME_PATH="${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}"
-          export ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-${ASCEND_HOME_PATH}}"
-          export ASCEND_OPP_PATH="${ASCEND_OPP_PATH:-${ASCEND_HOME_PATH}/opp}"
-          export ASCEND_AICPU_PATH="${ASCEND_AICPU_PATH:-${ASCEND_HOME_PATH}}"
-          export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/ascend-toolkit/latest/runtime/lib64:/usr/local/Ascend/ascend-toolkit/latest/runtime/lib64/stub:/usr/local/Ascend/ascend-toolkit/latest/tools/hccl/lib64:/usr/local/Ascend/ascend-toolkit/latest/hccl/lib64:${LD_LIBRARY_PATH:-}"
-
-          cann_python_paths=()
-          for path in \
-            "${ASCEND_HOME_PATH}/python/site-packages" \
-            "${ASCEND_HOME_PATH}/opp/built-in/op_impl/ai_core/tbe"; do
-            if [ -d "$path" ]; then
-              cann_python_paths+=("$path")
-            fi
+          for env_file in \
+            /usr/local/Ascend/ascend-toolkit/set_env.sh \
+            /usr/local/Ascend/nnal/atb/set_env.sh; do
+            [ -f "${env_file}" ] && source "${env_file}"
           done
-          if [ ${#cann_python_paths[@]} -gt 0 ]; then
-            export PYTHONPATH="$(IFS=:; echo "${cann_python_paths[*]}"):${PYTHONPATH:-}"
-          fi
 
-          echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH}" >> "$GITHUB_ENV"
-          echo "ASCEND_TOOLKIT_HOME=${ASCEND_TOOLKIT_HOME}" >> "$GITHUB_ENV"
-          echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH}" >> "$GITHUB_ENV"
-          echo "ASCEND_AICPU_PATH=${ASCEND_AICPU_PATH}" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          echo "PYTHONPATH=${PYTHONPATH:-}" >> "$GITHUB_ENV"
-          echo "${ASCEND_HOME_PATH}/bin" >> "$GITHUB_PATH"
-          echo "${ASCEND_HOME_PATH}/compiler/ccec_compiler/bin" >> "$GITHUB_PATH"
+          ASCEND_HOME_PATH="${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}"
+          ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-${ASCEND_HOME_PATH}}"
+          ASCEND_OPP_PATH="${ASCEND_OPP_PATH:-${ASCEND_HOME_PATH}/opp}"
+          ASCEND_AICPU_PATH="${ASCEND_AICPU_PATH:-${ASCEND_HOME_PATH}}"
+          LD_LIBRARY_PATH="${ASCEND_HOME_PATH}/lib64:${ASCEND_HOME_PATH}/runtime/lib64:${ASCEND_HOME_PATH}/runtime/lib64/stub:${ASCEND_HOME_PATH}/tools/hccl/lib64:${ASCEND_HOME_PATH}/hccl/lib64:${LD_LIBRARY_PATH:-}"
 
-      - name: Show environment info
+          for path in \
+            "${ASCEND_OPP_PATH}/built-in/op_impl/ai_core/tbe" \
+            "${ASCEND_HOME_PATH}/python/site-packages"; do
+            [ -d "${path}" ] && PYTHONPATH="${path}:${PYTHONPATH:-}"
+          done
+
+          {
+            echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH}"
+            echo "ASCEND_TOOLKIT_HOME=${ASCEND_TOOLKIT_HOME}"
+            echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH}"
+            echo "ASCEND_AICPU_PATH=${ASCEND_AICPU_PATH}"
+            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
+            echo "PYTHONPATH=${PYTHONPATH:-}"
+          } >> "${GITHUB_ENV}"
+          {
+            echo "${ASCEND_HOME_PATH}/bin"
+            echo "${ASCEND_HOME_PATH}/compiler/ccec_compiler/bin"
+          } >> "${GITHUB_PATH}"
+
+      - name: Check NPU environment
         run: |
           python3 - <<'PY'
-          import importlib.metadata as metadata
           import importlib.util
-          import sys
 
           import torch
           import torch_npu
 
-          def module_available(name):
-              return importlib.util.find_spec(name) is not None
-
-          print(f"python={sys.version.split()[0]}")
-          print(f"pip={metadata.version('pip')}")
-          print(f"torch={torch.__version__}")
-          print(f"torch_npu={torch_npu.__version__}")
-
-          if not module_available("tbe"):
+          if importlib.util.find_spec("tbe") is None:
               raise RuntimeError("CANN tbe Python module is not visible in PYTHONPATH")
           if not torch.npu.is_available():
               raise RuntimeError("torch.npu.is_available() is False")
           print(f"npu_device_count={torch.npu.device_count()}")
           PY
-          npu-smi info
 
       - name: Install ROLL requirements
         shell: bash
         run: |
-          set +e
-          (
-            set -e
-            python3 -m pip install --upgrade pip wheel
-            # torchair still imports pkg_resources; setuptools 82 removed it.
-            python3 -m pip install "setuptools<82"
-            python3 -m pip install --retries 10 --timeout 120 pytest-timeout
-            python3 -m pip install --retries 10 --timeout 120 -r requirements_common.txt
-            python3 -m pip install --retries 10 --timeout 120 deepspeed==0.16.4 tensorboard
-            python3 -m pip install "setuptools<82"
-            python3 -c "import pkg_resources; print('pkg_resources=available')"
-          ) 2>&1 | tee npu_mindspeed_install.log
-          status=${PIPESTATUS[0]}
-          set -e
-          if [ "${status}" -ne 0 ]; then
-            python3 - <<'PY'
-          from pathlib import Path
-
-          text = Path("npu_mindspeed_install.log").read_text(encoding="utf-8", errors="replace")
-          payload = "\n".join(text.splitlines()[-160:])[-8000:]
-          escaped = payload.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-          print(f"::error title=MindSpeed install failure tail::{escaped}")
-          PY
-            exit "${status}"
-          fi
+          python3 -m pip install --upgrade pip wheel
+          # torchair still imports pkg_resources; setuptools 82 removed it.
+          python3 -m pip install "setuptools<82"
+          python3 -m pip install --retries 10 --timeout 120 pytest-timeout
+          python3 -m pip install --retries 10 --timeout 120 -r requirements_common.txt
+          python3 -m pip install --retries 10 --timeout 120 deepspeed==0.16.4 tensorboard
+          python3 -m pip install "setuptools<82"
+          python3 -c "import pkg_resources"
 
       - name: Install MindSpeed core_r0.16.0
         shell: bash
@@ -185,7 +152,6 @@ jobs:
           rm -rf "${MINDSPEED_SRC}"
           git clone --depth 1 --branch "${MINDSPEED_REF}" "${MINDSPEED_REPO}" "${MINDSPEED_SRC}"
           cd "${MINDSPEED_SRC}"
-          git log -1 --oneline
           python3 -m pip install --no-build-isolation --no-deps -e .
 
       - name: Install ROLL
@@ -198,7 +164,6 @@ jobs:
           set -eo pipefail
           local_model="/data/cpfs_0/common/models/Qwen2.5-0.5B-Instruct"
           if [ -d "${local_model}" ]; then
-            echo "ROLL_MEGATRON_TEST_MODEL=${local_model}"
             echo "ROLL_MEGATRON_TEST_MODEL=${local_model}" >> "${GITHUB_ENV}"
             exit 0
           fi
@@ -208,82 +173,15 @@ jobs:
           from huggingface_hub import snapshot_download
 
           model_path = snapshot_download("Qwen/Qwen2.5-0.5B-Instruct")
-          print(f"ROLL_MEGATRON_TEST_MODEL={model_path}")
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
               env_file.write(f"ROLL_MEGATRON_TEST_MODEL={model_path}\n")
-          PY
-
-      - name: Show MindSpeed and vLLM Ascend info
-        run: |
-          export PYTHONPATH="${GITHUB_WORKSPACE}/mcore_adapter/src:${GITHUB_WORKSPACE}:${PYTHONPATH:-}"
-          python3 - <<'PY'
-          import importlib.metadata as metadata
-
-          import mindspeed
-          import mindspeed.megatron_adaptor
-          import torch
-          import vllm
-          from roll.platforms import current_platform
-
-          def package_version(name):
-              try:
-                  return metadata.version(name)
-              except metadata.PackageNotFoundError:
-                  return "not installed"
-
-          packages = (
-              "mindspeed",
-              "mcore_adapter",
-              "megatron-core",
-              "vllm-ascend",
-              "torch",
-              "torch-npu",
-              "transformers",
-              "deepspeed",
-          )
-          for package_name in packages:
-              print(f"{package_name}={package_version(package_name)}")
-
-          print(f"mindspeed_path={mindspeed.__path__}")
-          import mcore_adapter
-
-          print(f"mcore_adapter_path={mcore_adapter.__path__}")
-          print(f"vllm={vllm.__version__}")
-          print(f"platform={current_platform.device_type}")
-          print(f"npu_device_count={torch.npu.device_count()}")
           PY
 
       - name: Run MindSpeed Megatron offload tests
         shell: bash
         run: |
           export PYTHONPATH="${GITHUB_WORKSPACE}/mcore_adapter/src:${GITHUB_WORKSPACE}:${PYTHONPATH:-}"
-          set +e
-          torchrun --standalone --nnodes=1 --nproc-per-node=2 -m pytest -s -vv --tb=short tests/third_party/megatron/test_offload_states.py 2>&1 | tee npu_mindspeed_pytest.log
-          status=${PIPESTATUS[0]}
-          set -e
-          if [ "${status}" -ne 0 ]; then
-            python3 - <<'PY'
-          from pathlib import Path
-
-          log_path = Path("npu_mindspeed_pytest.log")
-          text = log_path.read_text(encoding="utf-8", errors="replace")
-          sections = []
-          for marker in (
-              "=================================== FAILURES ===================================",
-              "=========================== short test summary info ============================",
-          ):
-              index = text.find(marker)
-              if index != -1:
-                  sections.append(text[index : index + 5000])
-          if not sections:
-              lines = text.splitlines()
-              sections.append("\n".join(lines[-120:]))
-          payload = "\n\n".join(sections)
-          payload = payload[-8000:]
-          escaped = payload.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-          print(f"::error title=MindSpeed pytest failure tail::{escaped}")
-          PY
-            exit "${status}"
-          fi
+          torchrun --standalone --nnodes=1 --nproc-per-node=2 \
+            -m pytest -q --tb=short tests/third_party/megatron/test_offload_states.py
         env:
           ROLL_NPU_CI: "1"

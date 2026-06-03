@@ -32,8 +32,11 @@ from roll.third_party.megatron.offload_states_patch import (
 )
 from roll.third_party.megatron.optimizer import get_megatron_optimizer
 
-if os.environ.get("ROLL_NPU_CI") == "1":
-    import mindspeed.megatron_adaptor  # noqa: F401
+try:
+    # NPU patch
+    import mindspeed.megatron_adaptor
+except ImportError:
+    pass
 
 
 def _default_model_name():

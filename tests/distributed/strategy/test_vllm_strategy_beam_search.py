@@ -59,6 +59,7 @@ def _install_mock_vllm_modules(monkeypatch):
     mock_vllm.__version__ = "0.8.4"
     mock_vllm.RequestOutput = MockRequestOutput
     mock_vllm.SamplingParams = MockSamplingParams
+    mock_vllm.TokensPrompt = MockTokensPrompt
 
     sampling_params = ModuleType("vllm.sampling_params")
     sampling_params.RequestOutputKind = Mock()

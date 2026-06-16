@@ -1,7 +1,6 @@
 import os
 import random
 import sys
-from importlib import import_module
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -30,8 +29,7 @@ def bootstrap_npu_runtime():
     import torch_npu  # noqa: F401
 
     try:
-        import_module("flashinfer")
-        import_module("mindspeed.megatron_adaptor")
+        import mindspeed.megatron_adaptor  # noqa: F401
     except ImportError:
         pass
 

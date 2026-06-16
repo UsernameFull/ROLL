@@ -44,6 +44,28 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _replace_with_rmsnorm(submodules, attr_name):
+    if not hasattr(submodules, attr_name):
+        return
+    norm = getattr(submodules, attr_name)
+    norm_name = norm.__name__ if isinstance(norm, type) else norm.__class__.__name__
+    if not norm_name.endswith("RMSNorm"):
+        setattr(submodules, attr_name, RMSNorm)
+
+
+def _apply_npu_rmsnorm_overrides(module_spec, qk_layernorm: bool = False, set_layer_norm: bool = False):
+    if set_layer_norm:
+        module_spec.layer_norm = RMSNorm
+
+    _replace_with_rmsnorm(module_spec.submodules, "input_layernorm")
+    _replace_with_rmsnorm(module_spec.submodules, "pre_mlp_layernorm")
+
+    self_attn = getattr(module_spec.submodules, "self_attention", None)
+    if qk_layernorm and hasattr(self_attn, "submodules"):
+        _replace_with_rmsnorm(self_attn.submodules, "q_layernorm")
+        _replace_with_rmsnorm(self_attn.submodules, "k_layernorm")
+
+
 class VirtualModels:
     # a wrapper for model list to support virtual pipeline model parallel
     def __init__(self, cls, config: "McaModelConfig", *args, **kwargs):
@@ -369,8 +391,11 @@ class McaGPTModel(GPTModel, PretrainedModel):
                 transformer_block_spec.layer_norm = RMSNorm
             for transformer_layer_spec in transformer_block_spec.layer_specs:
                 if not use_te and config.normalization == "RMSNorm":
-                    transformer_layer_spec.submodules.input_layernorm = RMSNorm
-                    transformer_layer_spec.submodules.pre_mlp_layernorm = RMSNorm
+                    if current_platform.is_npu():
+                        _apply_npu_rmsnorm_overrides(transformer_layer_spec)
+                    else:
+                        transformer_layer_spec.submodules.input_layernorm = RMSNorm
+                        transformer_layer_spec.submodules.pre_mlp_layernorm = RMSNorm
                 if getattr(transformer_layer_spec.submodules.mlp.submodules, "shared_experts", None):
                     transformer_layer_spec.submodules.mlp.submodules.shared_experts.params["gate"] = (
                         config.moe_use_shared_expert_gate
@@ -381,6 +406,21 @@ class McaGPTModel(GPTModel, PretrainedModel):
                 config.num_moe_experts, config.moe_grouped_gemm, qk_layernorm=config.qk_layernorm
             )
         else:
+            if current_platform.is_npu():
+                module_spec = get_gpt_layer_local_spec(
+                    config.num_moe_experts,
+                    config.moe_grouped_gemm,
+                    qk_layernorm=config.qk_layernorm,
+                    normalization=config.normalization,
+                )
+                if config.normalization == "RMSNorm":
+                    _apply_npu_rmsnorm_overrides(
+                        module_spec,
+                        qk_layernorm=config.qk_layernorm,
+                        set_layer_norm=True,
+                    )
+                return module_spec
+
             module_spec = get_gpt_layer_local_spec(
                 config.num_moe_experts, config.moe_grouped_gemm, qk_layernorm=config.qk_layernorm
             )

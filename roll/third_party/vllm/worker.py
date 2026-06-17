@@ -13,7 +13,7 @@ from roll.platforms import current_platform
 from roll.third_party.vllm.vllm_utils import TensorLoRARequest, patch_vllm_lora_manager
 from roll.utils.collective import collective
 from roll.utils.cuda_ipc_utils import MultiprocessingSerializer
-from roll.utils.fp8 import is_mxfp8_ascend, is_npu_available
+from roll.utils.fp8 import is_mxfp8_ascend, per_block_fp8_quant_ascend
 from roll.utils.logging import get_logger
 from roll.utils.send_recv_utils import monkey_patch_torch_reductions, named_tensors_from_bucket
 
@@ -108,6 +108,93 @@ def _quant_config_from_model(model) -> Optional[object]:
     return None
 
 
+def _get_module_from_param_name(model: torch.nn.Module, name: str) -> Optional[torch.nn.Module]:
+    """Resolve the vLLM module that owns a checkpoint parameter name."""
+    try:
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    except ImportError:
+        from vllm.model_executor.layers.fused_moe import FusedMoE
+
+    packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
+    reversed_mapping = {
+        original_name: fused_name
+        for fused_name, original_names in packed_modules_mapping.items()
+        for original_name in original_names
+    }
+
+    module_path = name.split(".")[:-1]
+    if module_path and module_path[-1] in reversed_mapping:
+        module_path[-1] = reversed_mapping[module_path[-1]]
+
+    current_module = model
+    try:
+        for part in module_path:
+            if isinstance(current_module, FusedMoE):
+                return current_module
+            if isinstance(current_module, torch.nn.ModuleList):
+                current_module = current_module[int(part)]
+            else:
+                current_module = getattr(current_module, part)
+    except (AttributeError, IndexError, ValueError):
+        return None
+    return current_module
+
+
+def _is_mxfp8_weight_name(
+    name: str,
+    model: torch.nn.Module,
+    seen_params: set[str],
+    mxfp8_param_names: set[str],
+) -> bool:
+    if name not in seen_params:
+        seen_params.add(name)
+        if not name.endswith("weight"):
+            return False
+
+        from vllm.model_executor.layers.linear import LinearBase
+
+        try:
+            from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+        except ImportError:
+            from vllm.model_executor.layers.fused_moe import FusedMoE
+
+        module = _get_module_from_param_name(model, name)
+        if isinstance(module, LinearBase) and module.weight.dtype == torch.float8_e4m3fn:
+            mxfp8_param_names.add(name)
+        elif (
+            isinstance(module, FusedMoE)
+            and module.w13_weight.dtype == torch.float8_e4m3fn
+            and module.w2_weight.dtype == torch.float8_e4m3fn
+        ):
+            mxfp8_param_names.add(name)
+
+    return name in mxfp8_param_names
+
+
+def _quantize_mxfp8_weights_for_loading(
+    weights: Iterable[Tuple[str, torch.Tensor]],
+    model: torch.nn.Module,
+    dtype: torch.dtype,
+) -> Iterable[Tuple[str, torch.Tensor]]:
+    """Quantize bf16/fp16 synced weights into Ascend MXFP8 weight+scale pairs."""
+    seen_params: set[str] = set()
+    mxfp8_param_names: set[str] = set()
+
+    for name, weight in weights:
+        if not _is_mxfp8_weight_name(name, model, seen_params, mxfp8_param_names):
+            yield name, weight
+            continue
+
+        if weight.dtype == torch.float8_e4m3fn:
+            yield name, weight
+            continue
+
+        quantized_weight, weight_scale = per_block_fp8_quant_ascend(weight, dtype=dtype)
+        weight_scale = weight_scale.squeeze(-1)
+        yield name, quantized_weight
+        yield f"{name}_scale", weight_scale
+
+
 class TensorLoraManager:
     def __init__(self):
         self.lora_params = OrderedDict()
@@ -170,6 +257,11 @@ class WorkerBase:
         #   ① restore HF shapes → ② load_weights → ③ re-apply NPU transforms
         if self._is_mxfp8_model:
             restore_mxfp8_weights_for_loading(model)
+            weights = _quantize_mxfp8_weights_for_loading(
+                weights,
+                model,
+                dtype=getattr(self.model_config, "dtype", torch.bfloat16),
+            )
 
         model.load_weights(weights=weights)
 
@@ -251,8 +343,13 @@ class WorkerBase:
         # Ascend MXFP8 three-phase lifecycle (same as load_weights).
         if self._is_mxfp8_model:
             restore_mxfp8_weights_for_loading(model)
+            named_params = _quantize_mxfp8_weights_for_loading(
+                named_params,
+                model,
+                dtype=getattr(self.model_config, "dtype", torch.bfloat16),
+            )
 
-        model.load_weights([(name, weight) for name, weight in named_params])
+        model.load_weights(named_params)
 
         if self._is_mxfp8_model:
             apply_mxfp8_transformation_after_loading(model)

@@ -14,6 +14,7 @@ from roll.platforms import current_platform
 import roll.third_party.vllm.fp8 as fp8
 from roll.utils.import_utils import safe_import_class
 from roll.utils.logging import get_logger
+from roll.utils.vllm_online_quantization import apply_online_quantization_config
 
 
 logger = get_logger()
@@ -83,6 +84,13 @@ async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
     if Version(torch.__version__) >= Version("2.8.0"):
         os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
         # os.environ["VLLM_ATTENTION_BACKEND"] = "FLASH_ATTN" # for 280 rollout pipeline 乱码
+
+    online_quant_config = apply_online_quantization_config(kwargs)
+    if online_quant_config is not None:
+        logger.info(
+            "Enabled ROLL online quantization: ascend_mxfp8, %d quant description entries",
+            len(online_quant_config),
+        )
 
     engine_args = AsyncEngineArgs(**kwargs)
     # VLLM_USE_V1 may be modified inside create_engine_config

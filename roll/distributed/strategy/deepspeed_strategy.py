@@ -1,7 +1,7 @@
 from collections import defaultdict
 from contextlib import nullcontext
 from datetime import timedelta
-from typing import Callable, Dict, Tuple
+from typing import Any, Callable, Dict, Tuple
 
 import deepspeed
 import torch
@@ -32,6 +32,9 @@ from roll.utils.offload_states import OffloadStateType
 
 
 logger = get_logger()
+
+
+_NPU_VECTOR_NORM_DTYPES = {torch.float32, torch.float16, torch.bfloat16}
 
 
 class DeepSpeedInferStrategy(InferenceStrategy):
@@ -318,6 +321,85 @@ class DeepSpeedInferStrategy(InferenceStrategy):
 class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
     strategy_name = "deepspeed_train"
 
+    def _log_deepspeed_step_dtype_diagnostics(self, err: BaseException, max_samples: int = 12) -> None:
+        """Log tensors that can make NPU vector_norm fail inside DeepSpeed step."""
+
+        def _count_dtype(counts: dict[str, int], tensor: torch.Tensor) -> None:
+            counts[str(tensor.dtype)] = counts.get(str(tensor.dtype), 0) + 1
+
+        def _add_bad_sample(samples: list[str], name: str, tensor: torch.Tensor) -> None:
+            if tensor.dtype in _NPU_VECTOR_NORM_DTYPES:
+                return
+            if len(samples) >= max_samples:
+                return
+            samples.append(
+                f"{name}: dtype={tensor.dtype}, device={tensor.device}, "
+                f"shape={tuple(tensor.shape)}, requires_grad={getattr(tensor, 'requires_grad', False)}"
+            )
+
+        param_dtype_counts: dict[str, int] = {}
+        grad_dtype_counts: dict[str, int] = {}
+        bad_samples: list[str] = []
+
+        for name, param in self.unwrap_model().named_parameters():
+            _count_dtype(param_dtype_counts, param)
+            _add_bad_sample(bad_samples, f"param {name}", param)
+            ds_tensor = getattr(param, "ds_tensor", None)
+            if torch.is_tensor(ds_tensor):
+                _add_bad_sample(bad_samples, f"param {name}.ds_tensor", ds_tensor)
+            grad = getattr(param, "grad", None)
+            if torch.is_tensor(grad):
+                _count_dtype(grad_dtype_counts, grad)
+                _add_bad_sample(bad_samples, f"grad {name}", grad)
+
+        optimizer = getattr(self.model, "optimizer", getattr(self, "optimizer", None))
+        optimizer_dtype_counts: dict[str, int] = {}
+        optimizer_samples: list[str] = []
+
+        def _walk_optimizer_tensors(prefix: str, obj: Any, depth: int, seen: set[int]) -> None:
+            if len(optimizer_samples) >= max_samples or depth < 0:
+                return
+            obj_id = id(obj)
+            if obj_id in seen:
+                return
+            seen.add(obj_id)
+
+            if torch.is_tensor(obj):
+                _count_dtype(optimizer_dtype_counts, obj)
+                _add_bad_sample(optimizer_samples, prefix, obj)
+                return
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    _walk_optimizer_tensors(f"{prefix}.{key}", value, depth - 1, seen)
+                return
+            if isinstance(obj, (list, tuple)):
+                for idx, value in enumerate(obj):
+                    _walk_optimizer_tensors(f"{prefix}[{idx}]", value, depth - 1, seen)
+
+        for attr in (
+            "grad_partitions_flat_buffer",
+            "averaged_gradients",
+            "fp16_groups",
+            "fp16_partitioned_groups_flat",
+            "fp32_partitioned_groups_flat",
+            "single_partition_of_fp32_groups",
+            "optimizer",
+        ):
+            if optimizer is not None and hasattr(optimizer, attr):
+                _walk_optimizer_tensors(f"optimizer.{attr}", getattr(optimizer, attr), depth=3, seen=set())
+
+        logger.error(
+            "DeepSpeed step failed; dtype diagnostics for possible NPU vector_norm issue. "
+            "error=%s param_dtypes=%s grad_dtypes=%s optimizer_tensor_dtypes=%s "
+            "unsupported_param_or_grad_samples=%s unsupported_optimizer_samples=%s",
+            err,
+            param_dtype_counts,
+            grad_dtype_counts,
+            optimizer_dtype_counts,
+            bad_samples,
+            optimizer_samples,
+        )
+
     def initialize(self, model_provider):
         assert self.ds_config._stage > 0, "deepspeed train only supports zero > 0."
 
@@ -494,7 +576,13 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
             is_gradient_accumulation_boundary = self.model.is_gradient_accumulation_boundary()
             if is_gradient_accumulation_boundary:
                 self.load_states(include=[OffloadStateType.optimizer_states])
-            self.model.step()
+            try:
+                self.model.step()
+            except RuntimeError as err:
+                err_msg = str(err)
+                if "aclnnLinalgVectorNorm" in err_msg or "vector_norm" in err_msg or "dtype support list" in err_msg:
+                    self._log_deepspeed_step_dtype_diagnostics(err)
+                raise
             if is_gradient_accumulation_boundary:
                 # global_grad_norm is calculated in optimizer.step thus put it
                 # into metrics after optimizer.step

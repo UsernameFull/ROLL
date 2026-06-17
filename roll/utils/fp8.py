@@ -44,6 +44,10 @@ def is_mxfp8_ascend(quant_config) -> bool:
     if quant_config is None:
         return False
 
+    quant_description = getattr(quant_config, "quant_description", None)
+    if isinstance(quant_description, dict) and quant_description.get("quant_method") == "ascend":
+        return True
+
     try:
         from vllm_ascend.quantization.modelslim_config import AscendModelSlimConfig
 

@@ -96,12 +96,16 @@ def _quant_config_from_model(model) -> Optional[object]:
     """Best-effort extraction of the vLLM quant_config from a model runner/model."""
     if model is None:
         return None
-    # model may be a ModelRunner – look for vllm_config.
-    runner = model if not hasattr(model, "model") else None
-    if runner is not None and hasattr(runner, "vllm_config"):
-        return getattr(runner.vllm_config, "quant_config", None)
+
+    # model may be a ModelRunner/Worker that directly carries vllm_config.
+    if hasattr(model, "vllm_config"):
+        return getattr(model.vllm_config, "quant_config", None)
+
     # model may be the inner nn.Module; try walking up via model_runner ref.
     inner = getattr(model, "model", model)
+    if hasattr(inner, "vllm_config"):
+        return getattr(inner.vllm_config, "quant_config", None)
+
     runner = getattr(inner, "model_runner", None)
     if runner is not None and hasattr(runner, "vllm_config"):
         return getattr(runner.vllm_config, "quant_config", None)
@@ -237,6 +241,11 @@ class WorkerBase:
         # Detect MXFP8 once at init time.
         quant_config = _quant_config_from_model(self.model_runner)
         self._is_mxfp8_model: bool = is_mxfp8_ascend(quant_config)
+        logger.info(
+            "MXFP8 worker detection: enabled=%s quant_config=%s",
+            self._is_mxfp8_model,
+            type(quant_config).__name__ if quant_config is not None else None,
+        )
 
     def reload_model(self):
         if not self.weight_loaded:
@@ -385,6 +394,11 @@ class WorkerV1(WorkerBase):
         if not self._is_mxfp8_model:
             quant_config = _quant_config_from_model(self.model_runner)
             self._is_mxfp8_model = is_mxfp8_ascend(quant_config)
+            logger.info(
+                "MXFP8 worker re-detection: enabled=%s quant_config=%s",
+                self._is_mxfp8_model,
+                type(quant_config).__name__ if quant_config is not None else None,
+            )
 
     # Use custom prefix because worker_extension_cls can not has
     # conflicting method name with vllm worker.

@@ -3,6 +3,7 @@ import hashlib
 import json
 import time
 from collections import OrderedDict
+from contextlib import nullcontext
 from typing import Iterable, Optional, Tuple
 
 import torch
@@ -90,6 +91,15 @@ def apply_mxfp8_transformation_after_loading(model: torch.nn.Module) -> None:
             "MXFP8: re-applied transformation on %d modules after weight loading",
             transformed_count,
         )
+
+
+def _vllm_config_context(vllm_config):
+    try:
+        from vllm.config import set_current_vllm_config
+
+        return set_current_vllm_config(vllm_config)
+    except ImportError:
+        return nullcontext()
 
 
 def _quant_config_from_model(model) -> Optional[object]:
@@ -275,7 +285,8 @@ class WorkerBase:
         model.load_weights(weights=weights)
 
         if self._is_mxfp8_model:
-            apply_mxfp8_transformation_after_loading(model)
+            with _vllm_config_context(self.vllm_config):
+                apply_mxfp8_transformation_after_loading(model)
 
     def load_states(self):
         self.reload_model()
@@ -361,7 +372,8 @@ class WorkerBase:
         model.load_weights(named_params)
 
         if self._is_mxfp8_model:
-            apply_mxfp8_transformation_after_loading(model)
+            with _vllm_config_context(self.vllm_config):
+                apply_mxfp8_transformation_after_loading(model)
 
     def process_weights_after_loading(self):
         if Version(vllm.__version__) >= Version("0.11.1"):
@@ -371,7 +383,7 @@ class WorkerBase:
             load_config = self.vllm_config.load_config
             load_device = (device_config.device if load_config.device is None else load_config.device)
             target_device = torch.device(load_device)
-            with set_default_torch_dtype(self.model_config.dtype):
+            with set_default_torch_dtype(self.model_config.dtype), _vllm_config_context(self.vllm_config):
                 process_weights_after_loading(self.model_runner.model,self.model_config,target_device)
         if (Version("0.11.0") == Version(vllm.__version__) or
                 Version("0.11.1rc1") == Version(vllm.__version__) or
@@ -381,7 +393,7 @@ class WorkerBase:
             load_config = self.vllm_config.load_config
             load_device = (device_config.device if load_config.device is None else load_config.device)
             target_device = torch.device(load_device)
-            with set_default_torch_dtype(self.model_config.dtype):
+            with set_default_torch_dtype(self.model_config.dtype), _vllm_config_context(self.vllm_config):
                 process_weights_after_loading(self.model_runner.model,self.model_config,target_device)
 
 

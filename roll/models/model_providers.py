@@ -261,6 +261,18 @@ def load_model(
     else:
         model = model_class.from_pretrained(**init_kwargs)
 
+    # Apply NPU operator patches for Ascend training (RMSNorm, SwiGLU, RoPE, MoE GMM).
+    # Must be done before FSDP wrapping so the patched forward methods are used.
+    from roll.platforms import current_platform
+
+    if current_platform.is_npu():
+        try:
+            import roll.models.transformers.npu_patch  # noqa: F401  (side-effect import)
+
+            logger.info("Applied NPU training patches (RMSNorm / SwiGLU / RoPE / MoE) for Ascend NPU")
+        except Exception:
+            logger.warning("Failed to apply NPU training patches – continuing with PyTorch native ops")
+
     if not model_args.disable_gradient_checkpointing:
         # PumpkinComment:
         # - use_reentrant=False is generally preferred, but some MoE models can produce

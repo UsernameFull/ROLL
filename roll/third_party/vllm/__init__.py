@@ -18,6 +18,16 @@ from roll.utils.logging import get_logger
 
 logger = get_logger()
 
+# Apply Ascend NPU hardware compatibility patches early (before vLLM engine creation).
+if current_platform.is_npu():
+    try:
+        import roll.third_party.vllm.npu_patch as npu_patch
+
+        npu_patch.check_vllm_ascend_before_server_launch()
+        npu_patch.apply_npu_vllm_patches()
+    except Exception as e:
+        logger.warning("Failed to apply vLLM-Ascend NPU patches: %s", e)
+
 if Version("0.8.4") == Version(vllm.__version__):
     import roll.third_party.vllm.vllm_0_8_4 # apply patch
     ray_executor_class_v0 = safe_import_class("roll.third_party.vllm.vllm_0_8_4.ray_distributed_executor.CustomRayDistributedExecutor")
@@ -79,6 +89,7 @@ async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
     vllm_config = engine_args.create_engine_config(UsageContext.ENGINE_CONTEXT)
 
     fp8.update_quant_config(vllm_config)
+    fp8.update_mxfp8_quant_config(vllm_config)  # Ascend NPU MXFP8 detection & setup
 
     # change parallel_config.placement_group for CustomRayDistributedExecutor
     parallel_config = vllm_config.parallel_config

@@ -3,7 +3,7 @@ import hashlib
 import json
 import time
 from collections import OrderedDict
-from typing import Iterable, Tuple
+from typing import Iterable, Optional, Tuple
 
 import torch
 import vllm
@@ -13,10 +13,99 @@ from roll.platforms import current_platform
 from roll.third_party.vllm.vllm_utils import TensorLoRARequest, patch_vllm_lora_manager
 from roll.utils.collective import collective
 from roll.utils.cuda_ipc_utils import MultiprocessingSerializer
+from roll.utils.fp8 import is_mxfp8_ascend, is_npu_available
 from roll.utils.logging import get_logger
 from roll.utils.send_recv_utils import monkey_patch_torch_reductions, named_tensors_from_bucket
 
 logger = get_logger()
+
+
+# ---------------------------------------------------------------------------
+# MXFP8 weight lifecycle helpers (Ascend NPU)
+# ---------------------------------------------------------------------------
+
+
+def restore_mxfp8_weights_for_loading(model: torch.nn.Module) -> None:
+    """Restore MXFP8-transformed weights to their original HuggingFace shapes.
+
+    On Ascend NPUs, vLLM-Ascend's ``process_weights_after_loading`` transposes
+    and reshapes weights for optimal NPU inference.  Before calling
+    ``model.load_weights()`` we must revert those transformations so the
+    weight loaders receive weights in the original HF layout.
+
+    This function iterates through all modules that have been marked as
+    MXFP8-transformed and calls the Ascend-provided restore method.
+    """
+    from vllm.model_executor.layers.linear import LinearBase
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+    restored_count = 0
+    for _name, module in model.named_modules():
+        if not isinstance(module, (LinearBase, FusedMoE)):
+            continue
+        if not hasattr(module, "_mxfp8_transformed"):
+            continue
+        if not hasattr(module, "quant_method"):
+            continue
+
+        quant_method = module.quant_method
+        # The Ascend quant method may be wrapped in an outer object.
+        inner = getattr(quant_method, "quant_method", quant_method)
+        restore_fn = getattr(inner, "restore_weights_for_rl_loading", None)
+        if restore_fn is not None:
+            restore_fn(module)
+            restored_count += 1
+
+    if restored_count > 0:
+        logger.info(
+            "MXFP8: restored %d modules to HF shapes before weight loading",
+            restored_count,
+        )
+
+
+def apply_mxfp8_transformation_after_loading(model: torch.nn.Module) -> None:
+    """Re-apply MXFP8 transformations after ``model.load_weights()``.
+
+    After weights have been loaded in HF format, the Ascend-required
+    transpose/reshape transformations must be re-applied so the model is
+    ready for NPU inference.  This calls ``process_weights_after_loading``
+    on every module that tracks its original shapes via
+    ``_mxfp8_original_shapes``.
+    """
+    from vllm.model_executor.layers.linear import LinearBase
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+    transformed_count = 0
+    for _name, module in model.named_modules():
+        if not isinstance(module, (LinearBase, FusedMoE)):
+            continue
+        if not hasattr(module, "_mxfp8_original_shapes"):
+            continue
+        if hasattr(module, "quant_method") and hasattr(module.quant_method, "process_weights_after_loading"):
+            module.quant_method.process_weights_after_loading(module)
+            transformed_count += 1
+
+    if transformed_count > 0:
+        logger.info(
+            "MXFP8: re-applied transformation on %d modules after weight loading",
+            transformed_count,
+        )
+
+
+def _quant_config_from_model(model) -> Optional[object]:
+    """Best-effort extraction of the vLLM quant_config from a model runner/model."""
+    if model is None:
+        return None
+    # model may be a ModelRunner – look for vllm_config.
+    runner = model if not hasattr(model, "model") else None
+    if runner is not None and hasattr(runner, "vllm_config"):
+        return getattr(runner.vllm_config, "quant_config", None)
+    # model may be the inner nn.Module; try walking up via model_runner ref.
+    inner = getattr(model, "model", model)
+    runner = getattr(inner, "model_runner", None)
+    if runner is not None and hasattr(runner, "vllm_config"):
+        return getattr(runner.vllm_config, "quant_config", None)
+    return None
 
 
 class TensorLoraManager:
@@ -58,6 +147,9 @@ class WorkerBase:
         self.buffers = None
         self.buffer_cache = None
         self.tensor_lora_manager = TensorLoraManager()
+        # Detect MXFP8 once at init time.
+        quant_config = _quant_config_from_model(self.model_runner)
+        self._is_mxfp8_model: bool = is_mxfp8_ascend(quant_config)
 
     def reload_model(self):
         if not self.weight_loaded:
@@ -67,11 +159,22 @@ class WorkerBase:
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # before updating the parameters, we need to reinitialize the previously released model
         self.reload_model()
+        model = self.model_runner.model
+
         if vllm.__version__ < "0.8.5":
             from roll.third_party.vllm.vllm_utils import patch_vllm_moe_model_weight_loader
 
-            patch_vllm_moe_model_weight_loader(self.model_runner.model)
-        self.model_runner.model.load_weights(weights=weights)
+            patch_vllm_moe_model_weight_loader(model)
+
+        # Ascend MXFP8 three-phase weight loading lifecycle:
+        #   ① restore HF shapes → ② load_weights → ③ re-apply NPU transforms
+        if self._is_mxfp8_model:
+            restore_mxfp8_weights_for_loading(model)
+
+        model.load_weights(weights=weights)
+
+        if self._is_mxfp8_model:
+            apply_mxfp8_transformation_after_loading(model)
 
     def load_states(self):
         self.reload_model()
@@ -141,7 +244,18 @@ class WorkerBase:
             for name, weight in named_params:
                 self.tensor_lora_manager.add_weight(name, weight)
             return
-        self.load_weights([(name, weight) for name, weight in named_params])
+
+        self.reload_model()
+        model = self.model_runner.model
+
+        # Ascend MXFP8 three-phase lifecycle (same as load_weights).
+        if self._is_mxfp8_model:
+            restore_mxfp8_weights_for_loading(model)
+
+        model.load_weights([(name, weight) for name, weight in named_params])
+
+        if self._is_mxfp8_model:
+            apply_mxfp8_transformation_after_loading(model)
 
     def process_weights_after_loading(self):
         if Version(vllm.__version__) >= Version("0.11.1"):
@@ -169,6 +283,11 @@ class WorkerV1(WorkerBase):
     def custom_init_worker(self, *args, **kwargs):
         super().custom_init_worker(*args, **kwargs)
         patch_vllm_lora_manager()
+        # Re-detect MXFP8 in case model_runner wasn't fully initialised during
+        # the base-class init (V1 lazy-init edge case).
+        if not self._is_mxfp8_model:
+            quant_config = _quant_config_from_model(self.model_runner)
+            self._is_mxfp8_model = is_mxfp8_ascend(quant_config)
 
     # Use custom prefix because worker_extension_cls can not has
     # conflicting method name with vllm worker.

@@ -1,6 +1,118 @@
-from typing import List
+from typing import List, Optional
 
 import torch
+
+from roll.utils.logging import get_logger
+
+logger = get_logger()
+
+# ---------------------------------------------------------------------------
+# Ascend NPU availability
+# ---------------------------------------------------------------------------
+
+_NPU_AVAILABLE = False
+try:
+    import torch_npu  # noqa: F401
+
+    _NPU_AVAILABLE = hasattr(torch, "npu") and torch.npu.is_available()
+except ImportError:
+    pass
+
+
+def is_npu_available() -> bool:
+    """Check if Ascend NPU is available for quantization."""
+    return _NPU_AVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# Ascend MXFP8 detection
+# ---------------------------------------------------------------------------
+
+
+def is_mxfp8_ascend(quant_config) -> bool:
+    """Detect whether the quant_config represents an Ascend MXFP8 configuration.
+
+    Ascend NPUs use ``vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig``
+    with ``quant_method == "ascend"`` instead of vLLM's native ``Fp8Config``.
+
+    Args:
+        quant_config: The vLLM or SGLang quantization config object.
+
+    Returns:
+        True if this is an Ascend MXFP8 config.
+    """
+    if quant_config is None:
+        return False
+
+    try:
+        from vllm_ascend.quantization.modelslim_config import AscendModelSlimConfig
+
+        if isinstance(quant_config, AscendModelSlimConfig):
+            quant_method = quant_config.quant_description.get("quant_method")
+            return quant_method in ["ascend"]
+    except ImportError:
+        pass
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# FP8 constants
+# ---------------------------------------------------------------------------
+
+FP8_DTYPE = torch.float8_e4m3fn
+FP8_MAX = torch.finfo(FP8_DTYPE).max
+FP8_MIN = torch.finfo(FP8_DTYPE).min
+
+
+# ---------------------------------------------------------------------------
+# Ascend MXFP8 dynamic quantization
+# ---------------------------------------------------------------------------
+
+
+def per_block_fp8_quant_ascend(
+    param_value: torch.Tensor,
+    dtype: Optional[torch.dtype] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize a weight tensor to MXFP8 format using Ascend NPU dynamic quantization.
+
+    On Ascend NPUs, MXFP8 (Microscaling FP8) uses a different block-sharing
+    scheme for scales compared to NVIDIA's blockwise FP8.  This function wraps
+    ``torch_npu.npu_dynamic_mx_quant`` which performs the quantization with
+    the correct MX format.
+
+    Args:
+        param_value: Input high-precision tensor (bf16/fp16).
+        dtype: Cast target before quantization (default: ``torch.bfloat16``).
+
+    Returns:
+        Tuple of ``(quantized_weight, scale)``:
+            - quantized_weight: FP8 quantized tensor.
+            - scale: Per-block scale factors (inverse scale).
+    """
+    if not _NPU_AVAILABLE:
+        raise RuntimeError(
+            "Ascend NPU is required for MXFP8 quantization but torch_npu "
+            "is not available.  Install torch_npu and ensure NPU devices "
+            "are visible."
+        )
+
+    if dtype is None:
+        dtype = torch.bfloat16
+
+    param_lp, param_scale = torch_npu.npu_dynamic_mx_quant(
+        param_value.to(dtype),
+        axis=-1,
+        dst_type=torch_npu.float8_e4m3fn,
+    )
+    param_scale = param_scale.flatten(-2, -1)
+
+    return param_lp, param_scale
+
+
+# ---------------------------------------------------------------------------
+# GPU blockwise FP8 quantization (existing)
+# ---------------------------------------------------------------------------
 
 # Block quant operator
 #

@@ -1,5 +1,5 @@
 from collections import defaultdict
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 from typing import Any, Callable, Dict, Tuple
 
@@ -35,6 +35,56 @@ logger = get_logger()
 
 
 _NPU_VECTOR_NORM_DTYPES = {torch.float32, torch.float16, torch.bfloat16}
+
+
+def _is_npu_float64_tensor(tensor: object) -> bool:
+    return (
+        torch.is_tensor(tensor)
+        and tensor.dtype == torch.float64
+        and getattr(tensor.device, "type", None) == current_platform.device_type
+    )
+
+
+@contextmanager
+def _npu_float64_norm_as_float32_context():
+    """Make DeepSpeed's CUDA-style ``double().norm()`` grad norm work on NPU.
+
+    Some DeepSpeed ZeRO paths compute gradient norms via ``grad.data.double().norm(2)``.
+    Ascend's vector_norm kernel does not support float64, while CUDA does.  During
+    the optimizer step we cast only float64 NPU norm inputs back to float32.
+    """
+    if not current_platform.is_npu():
+        yield
+        return
+
+    original_tensor_norm = torch.Tensor.norm
+    original_torch_norm = torch.norm
+    original_vector_norm = torch.linalg.vector_norm
+
+    def _tensor_norm_npu_safe(self, *args, **kwargs):
+        if _is_npu_float64_tensor(self):
+            return original_tensor_norm(self.float(), *args, **kwargs)
+        return original_tensor_norm(self, *args, **kwargs)
+
+    def _torch_norm_npu_safe(input, *args, **kwargs):
+        if _is_npu_float64_tensor(input):
+            return original_torch_norm(input.float(), *args, **kwargs)
+        return original_torch_norm(input, *args, **kwargs)
+
+    def _vector_norm_npu_safe(input, *args, **kwargs):
+        if _is_npu_float64_tensor(input):
+            return original_vector_norm(input.float(), *args, **kwargs)
+        return original_vector_norm(input, *args, **kwargs)
+
+    torch.Tensor.norm = _tensor_norm_npu_safe
+    torch.norm = _torch_norm_npu_safe
+    torch.linalg.vector_norm = _vector_norm_npu_safe
+    try:
+        yield
+    finally:
+        torch.Tensor.norm = original_tensor_norm
+        torch.norm = original_torch_norm
+        torch.linalg.vector_norm = original_vector_norm
 
 
 class DeepSpeedInferStrategy(InferenceStrategy):
@@ -577,7 +627,8 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
             if is_gradient_accumulation_boundary:
                 self.load_states(include=[OffloadStateType.optimizer_states])
             try:
-                self.model.step()
+                with _npu_float64_norm_as_float32_context():
+                    self.model.step()
             except RuntimeError as err:
                 err_msg = str(err)
                 if "aclnnLinalgVectorNorm" in err_msg or "vector_norm" in err_msg or "dtype support list" in err_msg:

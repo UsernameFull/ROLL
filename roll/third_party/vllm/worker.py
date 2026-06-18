@@ -131,6 +131,69 @@ def _temporary_parameter_subclass_types(model: torch.nn.Module):
     return _ParameterSubclassContext()
 
 
+def _clear_aclgraph_cache(obj, seen: set[int] | None = None) -> int:
+    """Best-effort invalidation for vLLM-Ascend ACL graph caches.
+
+    ACL graphs capture parameter storage addresses and should not be replayed
+    after RL weight refits that replace FP8 weight/scale storage.  Clearing the
+    entries makes the next request re-capture graphs with the updated weights.
+    """
+    if obj is None:
+        return 0
+    if seen is None:
+        seen = set()
+
+    obj_id = id(obj)
+    if obj_id in seen:
+        return 0
+    seen.add(obj_id)
+
+    cleared = 0
+    entries = getattr(obj, "concrete_aclgraph_entries", None)
+    if isinstance(entries, dict):
+        cleared += len(entries)
+        entries.clear()
+
+    if isinstance(obj, torch.nn.Module):
+        for child in obj.children():
+            cleared += _clear_aclgraph_cache(child, seen)
+
+    # Cover vLLM v1/v2 manager/dispatcher layouts without depending on one
+    # private class name from a specific vLLM-Ascend release.
+    for attr in (
+        "model",
+        "runnable",
+        "drafter",
+        "speculator",
+        "cudagraph_manager",
+        "graph_manager",
+        "cudagraph_dispatcher",
+        "cudagraph_runners",
+        "graph_runners",
+        "_cudagraph_runners",
+        "_graph_runners",
+    ):
+        child = getattr(obj, attr, None)
+        if child is None:
+            continue
+        if isinstance(child, dict):
+            for value in child.values():
+                cleared += _clear_aclgraph_cache(value, seen)
+        elif isinstance(child, (list, tuple)):
+            for value in child:
+                cleared += _clear_aclgraph_cache(value, seen)
+        else:
+            cleared += _clear_aclgraph_cache(child, seen)
+
+    return cleared
+
+
+def invalidate_aclgraph_cache_after_weight_update(model_runner) -> None:
+    cleared = _clear_aclgraph_cache(model_runner)
+    if cleared > 0:
+        logger.info("ACLGraph: cleared %d cached graph entries after weight update", cleared)
+
+
 def _quant_config_from_model(model) -> Optional[object]:
     """Best-effort extraction of the vLLM quant_config from a model runner/model."""
     if model is None:
@@ -317,6 +380,7 @@ class WorkerBase:
         if self._is_mxfp8_model:
             with _vllm_config_context(self.vllm_config):
                 apply_mxfp8_transformation_after_loading(model)
+        invalidate_aclgraph_cache_after_weight_update(self.model_runner)
 
     def load_states(self):
         self.reload_model()
@@ -405,8 +469,10 @@ class WorkerBase:
         if self._is_mxfp8_model:
             with _vllm_config_context(self.vllm_config):
                 apply_mxfp8_transformation_after_loading(model)
+        invalidate_aclgraph_cache_after_weight_update(self.model_runner)
 
     def process_weights_after_loading(self):
+        processed = False
         if Version(vllm.__version__) >= Version("0.11.1"):
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
             from vllm.utils.torch_utils import set_default_torch_dtype
@@ -416,6 +482,7 @@ class WorkerBase:
             target_device = torch.device(load_device)
             with set_default_torch_dtype(self.model_config.dtype), _vllm_config_context(self.vllm_config):
                 process_weights_after_loading(self.model_runner.model,self.model_config,target_device)
+            processed = True
         if (Version("0.11.0") == Version(vllm.__version__) or
                 Version("0.11.1rc1") == Version(vllm.__version__) or
                 Version("0.11.1rc2.dev0+gc3a722fcb.d20251021") == Version(vllm.__version__)):
@@ -426,6 +493,9 @@ class WorkerBase:
             target_device = torch.device(load_device)
             with set_default_torch_dtype(self.model_config.dtype), _vllm_config_context(self.vllm_config):
                 process_weights_after_loading(self.model_runner.model,self.model_config,target_device)
+            processed = True
+        if processed:
+            invalidate_aclgraph_cache_after_weight_update(self.model_runner)
 
 
 class WorkerV1(WorkerBase):

@@ -102,6 +102,35 @@ def _vllm_config_context(vllm_config):
         return nullcontext()
 
 
+def _temporary_parameter_subclass_types(model: torch.nn.Module):
+    """Temporarily restore vLLM custom Parameter subclasses for load_weights.
+
+    Some vLLM model loaders branch on the actual parameter class, not only on
+    attributes attached to a plain ``torch.nn.Parameter``.  ROLL/verl keep the
+    subclass in ``param.subclass_type`` after post-loading rewrites so repeated
+    RL weight updates can still use the correct packed/sliced loaders.
+    """
+
+    class _ParameterSubclassContext:
+        def __enter__(self):
+            self._patched_params = []
+            for _name, param in model.named_parameters():
+                subclass_type = getattr(param, "subclass_type", None)
+                if subclass_type is None or param.__class__ is subclass_type:
+                    continue
+                self._patched_params.append((param, param.__class__))
+                param.__class__ = subclass_type
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            for param, original_type in reversed(self._patched_params):
+                param.__class__ = original_type
+            self._patched_params = []
+            return False
+
+    return _ParameterSubclassContext()
+
+
 def _quant_config_from_model(model) -> Optional[object]:
     """Best-effort extraction of the vLLM quant_config from a model runner/model."""
     if model is None:
@@ -282,7 +311,8 @@ class WorkerBase:
                 dtype=getattr(self.model_config, "dtype", torch.bfloat16),
             )
 
-        model.load_weights(weights=weights)
+        with _temporary_parameter_subclass_types(model):
+            model.load_weights(weights=weights)
 
         if self._is_mxfp8_model:
             with _vllm_config_context(self.vllm_config):
@@ -369,7 +399,8 @@ class WorkerBase:
                 dtype=getattr(self.model_config, "dtype", torch.bfloat16),
             )
 
-        model.load_weights(named_params)
+        with _temporary_parameter_subclass_types(model):
+            model.load_weights(named_params)
 
         if self._is_mxfp8_model:
             with _vllm_config_context(self.vllm_config):

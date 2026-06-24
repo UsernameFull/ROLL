@@ -131,6 +131,165 @@ def _temporary_parameter_subclass_types(model: torch.nn.Module):
     return _ParameterSubclassContext()
 
 
+_MXFP8_RUNTIME_TENSOR_ATTRS = (
+    "weight",
+    "weight_scale",
+    "weight_scale_inv",
+    "w13_weight",
+    "w13_weight_scale",
+    "w13_weight_scale_inv",
+    "w2_weight",
+    "w2_weight_scale",
+    "w2_weight_scale_inv",
+)
+
+
+def _tensor_data(value) -> Optional[torch.Tensor]:
+    if isinstance(value, torch.nn.Parameter):
+        return value.data
+    if isinstance(value, torch.Tensor):
+        return value
+    return None
+
+
+def _copy_parameter_metadata(param: torch.nn.Parameter, source) -> None:
+    if not isinstance(source, torch.nn.Parameter):
+        return
+
+    base_param_attrs = set(dir(torch.nn.Parameter))
+    for attr in dir(source):
+        if attr in base_param_attrs or attr.startswith("__"):
+            continue
+        try:
+            setattr(param, attr, getattr(source, attr))
+        except (AttributeError, RuntimeError):
+            pass
+
+    subclass_type = getattr(source, "subclass_type", type(source))
+    if subclass_type is not torch.nn.Parameter:
+        param.subclass_type = subclass_type
+
+
+def _parameter_from_runtime_ref(ref: torch.Tensor, source) -> torch.nn.Parameter:
+    param = torch.nn.Parameter(ref, requires_grad=False)
+    _copy_parameter_metadata(param, source)
+    return param
+
+
+def _runtime_value_from_ref(ref: torch.Tensor, source):
+    if isinstance(source, torch.nn.Parameter):
+        return _parameter_from_runtime_ref(ref, source)
+    return ref
+
+
+def _tensor_signature(tensor: torch.Tensor) -> tuple:
+    return (
+        tuple(tensor.shape),
+        tuple(tensor.stride()),
+        tensor.dtype,
+        tensor.device.type,
+        tensor.device.index,
+    )
+
+
+def _iter_mxfp8_runtime_modules(model: torch.nn.Module):
+    from vllm.model_executor.layers.linear import LinearBase
+
+    try:
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    except ImportError:
+        from vllm.model_executor.layers.fused_moe import FusedMoE
+
+    for name, module in model.named_modules():
+        if not isinstance(module, (LinearBase, FusedMoE)):
+            continue
+        if not (hasattr(module, "_mxfp8_original_shapes") or hasattr(module, "_mxfp8_transformed")):
+            continue
+        yield name, module
+
+
+def _record_mxfp8_runtime_refs(model: torch.nn.Module) -> int:
+    """Remember transformed runtime tensors so graph replay can keep addresses."""
+    recorded = 0
+    for _name, module in _iter_mxfp8_runtime_modules(model):
+        refs = {}
+        for attr in _MXFP8_RUNTIME_TENSOR_ATTRS:
+            tensor = _tensor_data(getattr(module, attr, None))
+            if tensor is not None:
+                refs[attr] = tensor
+
+        if refs:
+            module._roll_mxfp8_runtime_refs = refs
+            recorded += len(refs)
+
+    if recorded > 0:
+        logger.info("MXFP8: recorded %d runtime tensor refs for graph-safe reload", recorded)
+    return recorded
+
+
+def _restore_mxfp8_runtime_refs(model: torch.nn.Module) -> int:
+    """Copy newly transformed tensors back into the refs captured by ACL graph."""
+    restored = 0
+    errors = []
+
+    for module_name, module in _iter_mxfp8_runtime_modules(model):
+        refs = getattr(module, "_roll_mxfp8_runtime_refs", None)
+        if not refs:
+            continue
+
+        for attr, ref in refs.items():
+            current = getattr(module, attr, None)
+            tensor = _tensor_data(current)
+            if tensor is None:
+                errors.append(f"{module_name}.{attr}: missing transformed tensor")
+                continue
+
+            if _tensor_signature(tensor) != _tensor_signature(ref):
+                errors.append(
+                    f"{module_name}.{attr}: expected {_tensor_signature(ref)}, got {_tensor_signature(tensor)}"
+                )
+                continue
+
+            with torch.no_grad():
+                ref.copy_(tensor, non_blocking=False)
+
+            setattr(module, attr, _runtime_value_from_ref(ref, current))
+            restored += 1
+
+    if errors:
+        preview = "; ".join(errors[:5])
+        raise RuntimeError(
+            "MXFP8 graph-safe reload failed because transformed tensor metadata changed. "
+            "Use enforce_eager=True or recapture graphs through a coordinated graph lifecycle. "
+            f"First mismatches: {preview}"
+        )
+
+    if restored > 0:
+        logger.info("MXFP8: restored %d transformed tensors in-place for graph-safe reload", restored)
+    return restored
+
+
+def _has_mxfp8_runtime_refs(model: torch.nn.Module) -> bool:
+    return any(getattr(module, "_roll_mxfp8_runtime_refs", None) for _name, module in _iter_mxfp8_runtime_modules(model))
+
+
+def _apply_mxfp8_transformation_after_loading(
+    model: torch.nn.Module,
+    preserve_runtime_refs: bool,
+) -> bool:
+    has_runtime_refs = preserve_runtime_refs and _has_mxfp8_runtime_refs(model)
+
+    apply_mxfp8_transformation_after_loading(model)
+
+    if has_runtime_refs:
+        _restore_mxfp8_runtime_refs(model)
+        _record_mxfp8_runtime_refs(model)
+        return True
+
+    _record_mxfp8_runtime_refs(model)
+    return False
+
+
 def _clear_aclgraph_cache(obj, seen: set[int] | None = None) -> int:
     """Best-effort invalidation for vLLM-Ascend ACL graph caches.
 
@@ -377,10 +536,12 @@ class WorkerBase:
         with _temporary_parameter_subclass_types(model):
             model.load_weights(weights=weights)
 
+        graph_safe_update = False
         if self._is_mxfp8_model:
             with _vllm_config_context(self.vllm_config):
-                apply_mxfp8_transformation_after_loading(model)
-        invalidate_aclgraph_cache_after_weight_update(self.model_runner)
+                graph_safe_update = _apply_mxfp8_transformation_after_loading(model, preserve_runtime_refs=True)
+        if not graph_safe_update:
+            invalidate_aclgraph_cache_after_weight_update(self.model_runner)
 
     def load_states(self):
         self.reload_model()
@@ -466,10 +627,12 @@ class WorkerBase:
         with _temporary_parameter_subclass_types(model):
             model.load_weights(named_params)
 
+        graph_safe_update = False
         if self._is_mxfp8_model:
             with _vllm_config_context(self.vllm_config):
-                apply_mxfp8_transformation_after_loading(model)
-        invalidate_aclgraph_cache_after_weight_update(self.model_runner)
+                graph_safe_update = _apply_mxfp8_transformation_after_loading(model, preserve_runtime_refs=True)
+        if not graph_safe_update:
+            invalidate_aclgraph_cache_after_weight_update(self.model_runner)
 
     def process_weights_after_loading(self):
         processed = False
@@ -495,6 +658,8 @@ class WorkerBase:
                 process_weights_after_loading(self.model_runner.model,self.model_config,target_device)
             processed = True
         if processed:
+            if self._is_mxfp8_model:
+                _record_mxfp8_runtime_refs(self.model_runner.model)
             invalidate_aclgraph_cache_after_weight_update(self.model_runner)
 
 

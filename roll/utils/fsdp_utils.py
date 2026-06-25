@@ -271,16 +271,22 @@ def fsdp2_load_full_state_dict(
     else:
         model = model.to_empty(device=device_id)
 
-    cpu_offload = cpu_offload is not None
+    cpu_offload = bool(cpu_offload)
+    load_cpu_offload = cpu_offload and current_platform.device_type == "cpu"
     options = StateDictOptions(
         full_state_dict=True,
-        cpu_offload=cpu_offload,
+        # Keep accelerator collectives on the accelerator during initial FSDP2
+        # loading. On NPU/HCCL, loading with cpu_offload=True can leave DTensor
+        # full tensors on CPU and fail inside HCCL broadcast/distribute paths.
+        cpu_offload=load_cpu_offload,
         broadcast_from_rank0=True,
     )
     set_model_state_dict(model, full_state, options=options)
 
     # rotary_emb is not in state_dict, so we need to broadcast it manually
     for name, buf in model.named_buffers():
+        if buf.device.type == "cpu" and current_platform.device_type != "cpu":
+            buf.data = buf.data.to(device_id, non_blocking=True)
         dist.broadcast(buf, src=0)
 
     if cpu_offload:

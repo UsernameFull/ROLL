@@ -267,11 +267,25 @@ def load_model(
 
     if current_platform.is_npu():
         try:
-            import roll.models.transformers.npu_patch  # noqa: F401  (side-effect import)
+            import roll.models.transformers.npu_patch as npu_patch  # noqa: F401  (side-effect import)
 
-            logger.info("Applied NPU training patches (RMSNorm / SwiGLU / RoPE / MoE) for Ascend NPU")
-        except Exception:
-            logger.warning("Failed to apply NPU training patches – continuing with PyTorch native ops")
+            applied_patches = getattr(npu_patch, "APPLIED_PATCHES", [])
+            skipped_patches = getattr(npu_patch, "SKIPPED_PATCHES", {})
+            if applied_patches:
+                logger.info("Applied NPU training patches for Ascend NPU: %s", ", ".join(applied_patches))
+                if skipped_patches:
+                    logger.debug("Skipped optional NPU training patches: %s", skipped_patches)
+            else:
+                logger.warning(
+                    "No NPU training patches were applied; continuing with PyTorch native ops. skipped=%s",
+                    skipped_patches,
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to apply NPU training patches - continuing with PyTorch native ops: %s",
+                e,
+                exc_info=True,
+            )
 
     if not model_args.disable_gradient_checkpointing:
         # PumpkinComment:

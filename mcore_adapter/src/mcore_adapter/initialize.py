@@ -1,16 +1,78 @@
 import os
 import random
+import sys
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 from megatron.core import mpu, tensor_parallel
 
 from .platforms import current_platform
-from .training_args import TrainingArguments
 from .utils import get_logger
+
+if TYPE_CHECKING:
+    from .training_args import TrainingArguments
 
 
 logger = get_logger(__name__)
+
+
+_NPU_RUNTIME_BOOTSTRAPPED = False
+
+
+def bootstrap_npu_runtime():
+    global _NPU_RUNTIME_BOOTSTRAPPED
+
+    if _NPU_RUNTIME_BOOTSTRAPPED or not current_platform.is_npu():
+        return
+
+    import torch_npu  # noqa: F401
+
+    try:
+        import mindspeed.megatron_adaptor  # noqa: F401
+    except ImportError:
+        pass
+
+    import megatron.core.tensor_parallel.random as meg_random
+
+    if not hasattr(meg_random, "_npu_patched"):
+        meg_random.initialize_rng_tracker()
+
+        def patched_set(new_state, device=-1, graph_safe=False):
+            torch.npu.set_rng_state(new_state)
+            return
+
+        def patched_get(device="npu", clone=False, graph_safe=False):
+            return torch.npu.get_rng_state()
+
+        meg_random._set_cuda_rng_state = patched_set
+        meg_random._get_cuda_rng_state = patched_get
+
+        rng_state = torch.npu.get_rng_state()
+        meg_random._CUDA_RNG_STATE_TRACKER.states_["model-parallel-rng"] = rng_state
+        meg_random._CUDA_RNG_STATE_TRACKER.states_["data-parallel-rng"] = rng_state
+
+        meg_random._npu_patched = True
+
+    if not hasattr(torch.cuda, "_npu_patched"):
+        torch.cuda.current_device = lambda: torch.npu.current_device()
+        torch.cuda._npu_patched = True
+
+    _NPU_RUNTIME_BOOTSTRAPPED = True
+
+
+def apply_mindspeed_feature_defaults(config):
+    if "mindspeed.megatron_adaptor" not in sys.modules:
+        return
+
+    try:
+        from mindspeed.args_utils import get_mindspeed_args
+    except ImportError:
+        return
+
+    for name, value in vars(get_mindspeed_args(get_defaults=True)).items():
+        if not hasattr(config, name):
+            setattr(config, name, value)
 
 
 def is_distribute_initialized():
@@ -29,13 +91,14 @@ def _set_random_seed(seed_):
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        if current_platform.device_count() > 0:
+        if current_platform.is_cuda() and current_platform.device_count() > 0:
             tensor_parallel.model_parallel_cuda_manual_seed(seed)
     else:
         raise ValueError("Seed ({}) should be a positive integer.".format(seed))
 
 
 def initialize_megatron(args: "TrainingArguments"):
+    bootstrap_npu_runtime()
     if not is_distribute_initialized():
         _initialize_distributed(args)
     _set_random_seed(args.seed)

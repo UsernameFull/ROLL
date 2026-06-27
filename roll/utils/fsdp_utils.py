@@ -137,8 +137,14 @@ def apply_fsdp2(model, fsdp_kwargs, config, is_lora=False):
         default_transformer_cls_names_to_wrap,
     )
 
-    if isinstance(fsdp_transformer_layer_cls_to_wrap, str):
+    if fsdp_transformer_layer_cls_to_wrap is None:
+        fsdp_transformer_layer_cls_to_wrap = []
+    elif isinstance(fsdp_transformer_layer_cls_to_wrap, str):
         fsdp_transformer_layer_cls_to_wrap = [fsdp_transformer_layer_cls_to_wrap]
+    elif isinstance(fsdp_transformer_layer_cls_to_wrap, set):
+        fsdp_transformer_layer_cls_to_wrap = sorted(fsdp_transformer_layer_cls_to_wrap)
+    else:
+        fsdp_transformer_layer_cls_to_wrap = list(fsdp_transformer_layer_cls_to_wrap)
 
     assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and fsdp_transformer_layer_cls_to_wrap[0] is not None
 

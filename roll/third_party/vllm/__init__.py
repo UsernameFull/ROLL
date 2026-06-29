@@ -96,7 +96,7 @@ async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
     # VLLM_USE_V1 may be modified inside create_engine_config
     vllm_config = engine_args.create_engine_config(UsageContext.ENGINE_CONTEXT)
 
-    fp8.update_quant_config(vllm_config)
+    fp8.update_quant_config(config=kwargs, vllm_config=vllm_config)
     fp8.update_mxfp8_quant_config(vllm_config)  # Ascend NPU MXFP8 detection & setup
 
     # change parallel_config.placement_group for CustomRayDistributedExecutor

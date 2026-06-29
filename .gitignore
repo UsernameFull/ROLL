@@ -1,3 +1,5 @@
+nohup.out
+
 *.png
 *.pyc
 */checkpoint_dir
@@ -135,6 +137,7 @@ celerybeat.pid
 venv/
 env.bak/
 venv.bak/
+.project_conda_env/
 
 # Spyder project settings
 .spyderproject
@@ -171,3 +174,12 @@ log
 
 output/
 .vscode/
+
+.roo/
+.claude/
+.history/
+*.excp
+logs/
+tmp/
+.ml_tracker/
+:/

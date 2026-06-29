@@ -35,19 +35,25 @@ logger = get_logger()
 # ---------------------------------------------------------------------------
 
 
-def update_quant_config(vllm_config):
-    """Set ``is_checkpoint_fp8_serialized`` on standard NVIDIA FP8 configs.
+def update_quant_config(config, vllm_config):
+    """Enable ROLL's serialized FP8 path for explicit HF override configs.
 
-    Called once during vLLM engine creation so that ROLL's custom weight
-    loaders take over the FP8 serialization path.
+    Standard FP8 block quantization is selected through
+    ``hf_overrides.quantization_config``. MXFP8 uses a separate Ascend config
+    path and is handled by ``update_mxfp8_quant_config``.
     """
     if not vllm_config.quant_config:
         return
     if not isinstance(vllm_config.quant_config, Fp8Config):
         return
+    quantization_config = (config or {}).get("hf_overrides", {}).get("quantization_config")
+    if not quantization_config:
+        return
 
+    assert quantization_config["quant_method"] == "fp8"
     assert vllm_config.quant_config.activation_scheme == "dynamic"
     vllm_config.quant_config.is_checkpoint_fp8_serialized = True
+    vllm_config.quant_config.skip_process_weights_after_loading = True
     logger.info(
         f"Using custom vLLM quantization, block size {vllm_config.quant_config.weight_block_size}"
     )
@@ -272,6 +278,9 @@ def _fp8_linear_create_weights(
         input_size, output_size, params_dtype, **extra_weight_attrs,
     )
 
+    if not getattr(self.quant_config, "is_checkpoint_fp8_serialized", False):
+        return
+
     assert self.quant_config.is_checkpoint_fp8_serialized
     assert self.quant_config.activation_scheme == "dynamic"
     assert not self.use_marlin  # not implemented yet, because lack weight loader for channelwise weight_scale
@@ -308,6 +317,9 @@ def _fp8_linear_create_weights(
         )
         layer.shard_num = len(output_partition_sizes)
         layer.shard_loaded = 0
+
+    if not hasattr(layer, "input_scale"):
+        layer.register_parameter("input_scale", None)
 
 
 _original_fp8_linear_create_weights = Fp8LinearMethod.create_weights
@@ -512,6 +524,9 @@ def _fp8_moe_create_weights(
         params_dtype, **extra_weight_attrs,
     )
 
+    if not getattr(self.quant_config, "is_checkpoint_fp8_serialized", False):
+        return
+
     assert self.quant_config.is_checkpoint_fp8_serialized
     assert self.quant_config.activation_scheme == "dynamic"
     assert self.quant_config.weight_block_size is not None
@@ -526,6 +541,26 @@ def _fp8_moe_create_weights(
 
     # TODO: support ep
     assert layer.local_num_experts == num_experts
+
+    if getattr(self, "_setup_kernel", None):
+        from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+
+        assert self.fp8_backend not in [
+            Fp8MoeBackend.AITER,
+            Fp8MoeBackend.MARLIN,
+            Fp8MoeBackend.FLASHINFER_CUTLASS,
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            # TODO: support inflight fp8 quantization for DEEPGEMM and BATCHED_DEEPGEMM
+            Fp8MoeBackend.DEEPGEMM,
+            Fp8MoeBackend.BATCHED_DEEPGEMM,
+        ]
+        assert self.fp8_backend in [
+            Fp8MoeBackend.TRITON,
+            Fp8MoeBackend.BATCHED_TRITON,
+            Fp8MoeBackend.VLLM_CUTLASS,
+            Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
+            Fp8MoeBackend.XPU,
+        ]
 
     # Check whether this is an Ascend MXFP8 model.
     layer._roll_mxfp8 = is_mxfp8_ascend(self.quant_config)

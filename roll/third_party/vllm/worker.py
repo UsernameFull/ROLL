@@ -532,9 +532,18 @@ class WorkerBase:
                 model,
                 dtype=getattr(self.model_config, "dtype", torch.bfloat16),
             )
+        weights_list = list(weights)
 
         with _temporary_parameter_subclass_types(model):
-            model.load_weights(weights=weights)
+            model.load_weights(weights=weights_list)
+
+        # MTP/EAGLE drafter models are separate modules and need the same live
+        # weight refresh as the target model.
+        if hasattr(self.model_runner, "drafter") and hasattr(self.model_runner.drafter, "model"):
+            logger.info("Updating drafter (MTP/EAGLE) model weights...")
+            drafter_model = self.model_runner.drafter.model
+            with _temporary_parameter_subclass_types(drafter_model):
+                drafter_model.load_weights(weights=weights_list)
 
         graph_safe_update = False
         if self._is_mxfp8_model:

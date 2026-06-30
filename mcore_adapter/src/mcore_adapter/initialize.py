@@ -2,6 +2,7 @@ import os
 import random
 import sys
 from typing import TYPE_CHECKING
+import importlib.util
 
 import numpy as np
 import torch
@@ -18,6 +19,10 @@ logger = get_logger(__name__)
 
 
 _NPU_RUNTIME_BOOTSTRAPPED = False
+
+
+def _has_megatron_training():
+    return importlib.util.find_spec("megatron.training") is not None
 
 
 def ensure_npu_transformer_engine_symbols():
@@ -147,7 +152,7 @@ def sync_mindspeed_args(args: "TrainingArguments"):
             setattr(mindspeed_args, name, value)
             changed = True
 
-    if changed and current_platform.is_npu():
+    if changed and current_platform.is_npu() and _has_megatron_training():
         try:
             import mindspeed.megatron_adaptor as megatron_adaptor
 

@@ -120,6 +120,7 @@ def sync_mindspeed_args(args: "TrainingArguments"):
         "fp8_format",
         "fp8_recipe",
         "fp8_param",
+        "micro_batch_size",
         "context_parallel_size",
         "tensor_model_parallel_size",
         "pipeline_model_parallel_size",

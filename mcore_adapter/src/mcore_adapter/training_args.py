@@ -227,6 +227,10 @@ class DistributingParallelArguments:
             "global batch, versus the default behavior of assuming all tokens are non-padded."
         },
     )
+    micro_batch_size: Optional[int] = field(
+        default=None,
+        metadata={"help": "Megatron/MindSpeed alias for per_device_train_batch_size."},
+    )
     transformer_impl: Optional[Literal["local", "transformer_engine"]] = field(
         default=None,
         metadata={
@@ -295,6 +299,9 @@ class DistributingParallelArguments:
 
         if self.recompute_modules is not None and isinstance(self.recompute_modules, str):
             self.recompute_modules = self.recompute_modules.split(",")
+
+        if self.micro_batch_size is None and getattr(self, "per_device_train_batch_size", None) is not None:
+            self.micro_batch_size = self.per_device_train_batch_size
 
         if self.fp8 and self.fp8_format and self.fp8 != self.fp8_format:
             raise ValueError(f"fp8 ({self.fp8}) and fp8_format ({self.fp8_format}) must match when both are set.")

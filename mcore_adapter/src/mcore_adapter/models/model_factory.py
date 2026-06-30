@@ -6,16 +6,12 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 import torch
 from megatron.core import mpu, tensor_parallel
 from megatron.core.models.gpt import GPTModel
-from megatron.core.models.gpt.gpt_layer_specs import (
-    get_gpt_decoder_block_spec,
-    get_gpt_layer_local_spec,
-    get_gpt_mtp_block_spec,
-)
 from megatron.core.transformer.module import MegatronModule
 from transformers.tokenization_utils import PreTrainedTokenizer
 from transformers.utils import is_peft_available
 
 from ..checkpointing import find_dist_ckpt, generate_model_state_dict, load_state_dict_from_checkpoint, save_config_and_state_dict
+from ..initialize import ensure_npu_transformer_engine_symbols
 from ..platforms import current_platform
 from ..utils import get_logger
 from .converter.convert_utils import MAX_SHARD_SIZE
@@ -63,6 +59,16 @@ def _apply_npu_rmsnorm_overrides(module_spec, qk_layernorm: bool = False, set_la
     if qk_layernorm and hasattr(self_attn, "submodules"):
         _replace_with_rmsnorm(self_attn.submodules, "q_layernorm")
         _replace_with_rmsnorm(self_attn.submodules, "k_layernorm")
+
+
+def _get_gpt_layer_specs():
+    from megatron.core.models.gpt.gpt_layer_specs import (
+        get_gpt_decoder_block_spec,
+        get_gpt_layer_local_spec,
+        get_gpt_mtp_block_spec,
+    )
+
+    return get_gpt_decoder_block_spec, get_gpt_layer_local_spec, get_gpt_mtp_block_spec
 
 
 class VirtualModels:
@@ -398,7 +404,10 @@ class McaGPTModel(GPTModel, PretrainedModel):
     def _get_transformer_layer_spec(self, config: Optional["McaModelConfig"] = None):
         config = config or self.config
         use_te = config.transformer_impl == "transformer_engine"
+        get_gpt_decoder_block_spec, get_gpt_layer_local_spec, _ = _get_gpt_layer_specs()
         if config.num_moe_experts or (current_platform.is_npu() and use_te):
+            if current_platform.is_npu() and use_te:
+                ensure_npu_transformer_engine_symbols()
             transformer_block_spec = get_gpt_decoder_block_spec(
                 config, use_transformer_engine=use_te, vp_stage=self.vp_stage
             )
@@ -447,6 +456,7 @@ class McaGPTModel(GPTModel, PretrainedModel):
         if config.mtp_num_layers and config.mtp_num_layers > 0:
             transformer_layer_spec = self._get_transformer_layer_spec(config)
             use_te = config.transformer_impl == "transformer_engine"
+            _, _, get_gpt_mtp_block_spec = _get_gpt_layer_specs()
             spec = get_gpt_mtp_block_spec(config, transformer_layer_spec, use_te, vp_stage=vp_stage)
             return spec
         else:

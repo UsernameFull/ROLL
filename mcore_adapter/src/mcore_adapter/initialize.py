@@ -20,6 +20,29 @@ logger = get_logger(__name__)
 _NPU_RUNTIME_BOOTSTRAPPED = False
 
 
+def ensure_npu_transformer_engine_symbols():
+    if not current_platform.is_npu():
+        return
+
+    try:
+        import megatron.core.extensions.transformer_engine as te_ext
+        from mindspeed.core.transformer.custom_layers.transformer_engine import TENorm
+    except ImportError:
+        return
+
+    if getattr(te_ext, "TENorm", None) is not TENorm:
+        te_ext.TENorm = TENorm
+
+    for module_name in (
+        "megatron.core.models.gpt.gpt_layer_specs",
+        "mindspeed.core.models.gpt.gpt_layer_specs",
+        "mindspeed.core.transformer.transformer_block",
+    ):
+        module = sys.modules.get(module_name)
+        if module is not None and getattr(module, "TENorm", None) is not TENorm:
+            setattr(module, "TENorm", TENorm)
+
+
 def bootstrap_npu_runtime():
     global _NPU_RUNTIME_BOOTSTRAPPED
 
@@ -92,9 +115,15 @@ def sync_mindspeed_args(args: "TrainingArguments"):
         "fp8_format",
         "fp8_recipe",
         "fp8_param",
+        "context_parallel_size",
+        "tensor_model_parallel_size",
+        "pipeline_model_parallel_size",
+        "expert_model_parallel_size",
+        "expert_tensor_parallel_size",
         "use_ascend_mc2",
         "use_ascend_coc",
         "use_gmm_fp8",
+        "use_flash_attn",
         "te_comparison_with_cpu",
         "te_comparison_with_bf16",
     ):
@@ -109,6 +138,8 @@ def sync_mindspeed_args(args: "TrainingArguments"):
         updates["fp8"] = updates["fp8_format"]
     if updates.get("fp8") and "transformer_impl" not in updates:
         updates["transformer_impl"] = "transformer_engine"
+    if updates.get("transformer_impl") == "transformer_engine":
+        updates.setdefault("use_flash_attn", True)
 
     changed = False
     for name, value in updates.items():
@@ -116,14 +147,16 @@ def sync_mindspeed_args(args: "TrainingArguments"):
             setattr(mindspeed_args, name, value)
             changed = True
 
-    if changed and updates.get("fp8"):
+    if changed and current_platform.is_npu():
         try:
             import mindspeed.megatron_adaptor as megatron_adaptor
 
             if hasattr(megatron_adaptor, "repatch"):
                 megatron_adaptor.repatch(updates)
         except Exception as e:
-            logger.warning("Failed to repatch MindSpeed args for Megatron FP8: %s", e)
+            logger.warning("Failed to repatch MindSpeed args: %s", e)
+    if updates.get("fp8") or updates.get("transformer_impl") == "transformer_engine":
+        ensure_npu_transformer_engine_symbols()
 
 
 def is_distribute_initialized():

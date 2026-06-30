@@ -9,7 +9,6 @@ from megatron.core.models.gpt import GPTModel
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_decoder_block_spec,
     get_gpt_layer_local_spec,
-    get_gpt_layer_with_transformer_engine_spec,
     get_gpt_mtp_block_spec,
 )
 from megatron.core.transformer.module import MegatronModule
@@ -399,7 +398,7 @@ class McaGPTModel(GPTModel, PretrainedModel):
     def _get_transformer_layer_spec(self, config: Optional["McaModelConfig"] = None):
         config = config or self.config
         use_te = config.transformer_impl == "transformer_engine"
-        if config.num_moe_experts:
+        if config.num_moe_experts or (current_platform.is_npu() and use_te):
             transformer_block_spec = get_gpt_decoder_block_spec(
                 config, use_transformer_engine=use_te, vp_stage=self.vp_stage
             )
@@ -414,6 +413,8 @@ class McaGPTModel(GPTModel, PretrainedModel):
                         transformer_layer_spec.submodules.pre_mlp_layernorm = RMSNorm
             return transformer_block_spec
         if use_te:
+            from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
+
             return get_gpt_layer_with_transformer_engine_spec(
                 config.num_moe_experts, config.moe_grouped_gemm, qk_layernorm=config.qk_layernorm
             )

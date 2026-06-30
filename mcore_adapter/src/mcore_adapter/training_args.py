@@ -273,6 +273,10 @@ class DistributingParallelArguments:
             "help": "Alias of fp8 used by MindSpeed-TE on Ascend. If omitted, fp8 is used.",
         },
     )
+    use_flash_attn: Optional[bool] = field(
+        default=None,
+        metadata={"help": "Forward MindSpeed NPU flash attention switch when MindSpeed is available."},
+    )
     additional_configs: Optional[Union[str, dict]] = field(
         default_factory=dict,
         metadata={

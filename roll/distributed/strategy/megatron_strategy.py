@@ -558,7 +558,9 @@ class MegatronInferStrategy(InferenceStrategy):
             input_ids = self._get_feature_on_this_cp_rank(input_ids, "input_ids")
             attention_mask = self._get_feature_on_this_cp_rank(attention_mask, "attention_mask")
 
-            if hasattr(torch, "npu") and torch.npu.is_available() and attention_mask is not None:
+            if self.model.config.transformer_impl == "transformer_engine" and not self.model.config.num_moe_experts:
+                attention_mask = None
+            elif hasattr(torch, "npu") and torch.npu.is_available() and attention_mask is not None:
                 attention_mask = attention_mask.bool()
                 B, S = attention_mask.shape
                 attention_mask = attention_mask[:, None, None, :]   # [B,1,1,S]
@@ -1165,6 +1167,16 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
 
         if self.enable_router_replay:
             logger.info(f"Router Replay {self.router_replay_mode} mode: REPLAY enabled in MegatronTrainStrategy")
+
+        if (
+            current_platform.is_npu()
+            and self.use_sequence_packing
+            and getattr(self.megatron_train_args, "fp8", None)
+        ):
+            raise ValueError(
+                "Ascend Megatron FP8 training does not support use_sequence_packing yet; "
+                "disable use_sequence_packing to avoid NPU varlen fused attention failures."
+            )
 
     def initialize(self, model_provider):
         self.seq_length = self.worker.pipeline_config.sequence_length

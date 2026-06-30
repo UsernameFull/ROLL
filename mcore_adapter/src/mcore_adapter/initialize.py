@@ -143,8 +143,6 @@ def sync_mindspeed_args(args: "TrainingArguments"):
         updates["fp8"] = updates["fp8_format"]
     if updates.get("fp8") and "transformer_impl" not in updates:
         updates["transformer_impl"] = "transformer_engine"
-    if updates.get("transformer_impl") == "transformer_engine":
-        updates.setdefault("use_flash_attn", True)
 
     changed = False
     for name, value in updates.items():

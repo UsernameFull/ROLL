@@ -93,7 +93,7 @@ actor_train:
       recompute_num_layers: 1
       fp8: e4m3
       fp8_recipe: mxfp8
-      use_flash_attn: false
+      use_flash_attn: true
       moe_router_dtype: fp32
   use_sequence_packing: false
   use_remove_padding: false

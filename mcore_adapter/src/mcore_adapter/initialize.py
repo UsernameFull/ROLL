@@ -130,6 +130,7 @@ def sync_mindspeed_args(args: "TrainingArguments"):
         "use_ascend_coc",
         "use_gmm_fp8",
         "use_flash_attn",
+        "use_flash_attn_npu_batch_invariant",
         "te_comparison_with_cpu",
         "te_comparison_with_bf16",
     ):
@@ -144,6 +145,11 @@ def sync_mindspeed_args(args: "TrainingArguments"):
         updates["fp8"] = updates["fp8_format"]
     if updates.get("fp8") and "transformer_impl" not in updates:
         updates["transformer_impl"] = "transformer_engine"
+    if current_platform.is_npu():
+        if updates.get("use_flash_attn_npu_batch_invariant"):
+            updates["use_flash_attn"] = False
+        elif updates.get("transformer_impl") == "transformer_engine":
+            updates.setdefault("use_flash_attn", True)
 
     changed = False
     for name, value in updates.items():

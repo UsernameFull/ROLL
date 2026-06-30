@@ -269,6 +269,18 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
         default=0,
         metadata={"help": "Maximum size of sequence. This is used for positional embedding"},
     )
+    micro_batch_size: Optional[int] = field(
+        default=None,
+        metadata={"help": "Micro batch size used by Megatron/MindSpeed attention mask generation."},
+    )
+    use_flash_attn: Optional[bool] = field(
+        default=None,
+        metadata={"help": "MindSpeed NPU flash attention switch."},
+    )
+    use_flash_attn_npu_batch_invariant: Optional[bool] = field(
+        default=None,
+        metadata={"help": "MindSpeed flash-attn-npu batch-invariant attention switch."},
+    )
     moe_use_shared_expert_gate: bool = field(
         default=False,
         metadata={"help": "Use shared expert use sigmoid gate to control shared outputs."},
@@ -316,6 +328,10 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
             raise ValueError("Megatron FP8 training requires transformer_impl='transformer_engine'.")
         if current_platform.is_npu() and self.transformer_impl == "transformer_engine" and not fp8_enabled:
             self.transformer_impl = "local"
+        if current_platform.is_npu() and self.transformer_impl == "transformer_engine" and self.use_flash_attn is None:
+            self.use_flash_attn = not bool(self.use_flash_attn_npu_batch_invariant)
+        if current_platform.is_npu() and self.use_flash_attn_npu_batch_invariant:
+            self.use_flash_attn = False
 
         if self.virtual_pipeline_model_parallel_size is None and self.overlap_p2p_comm:
             self.overlap_p2p_comm = False

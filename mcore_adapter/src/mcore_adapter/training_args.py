@@ -281,6 +281,13 @@ class DistributingParallelArguments:
         default=None,
         metadata={"help": "Forward MindSpeed NPU flash attention switch when MindSpeed is available."},
     )
+    use_flash_attn_npu_batch_invariant: Optional[bool] = field(
+        default=None,
+        metadata={
+            "help": "Use MindSpeed flash-attn-npu batch-invariant attention. "
+            "When enabled on NPU, use_flash_attn is forced to False to avoid duplicate attention patches.",
+        },
+    )
     additional_configs: Optional[Union[str, dict]] = field(
         default_factory=dict,
         metadata={
@@ -315,6 +322,14 @@ class DistributingParallelArguments:
             self.transformer_impl = "transformer_engine"
         if self.fp8 and self.transformer_impl == "local":
             raise ValueError("Megatron FP8 training requires transformer_impl='transformer_engine'.")
+        if (
+            current_platform.is_npu()
+            and self.transformer_impl == "transformer_engine"
+            and self.use_flash_attn is None
+        ):
+            self.use_flash_attn = not bool(self.use_flash_attn_npu_batch_invariant)
+        if current_platform.is_npu() and self.use_flash_attn_npu_batch_invariant:
+            self.use_flash_attn = False
         if self.fp8_param:
             raise ValueError("fp8_param is not supported in ROLL Megatron FP8 training yet.")
 

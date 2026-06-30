@@ -29,6 +29,19 @@ def test_training_args_rejects_fp8_recipe_without_fp8_format():
         TrainingArguments(output_dir="tmp", fp8_recipe="mxfp8")
 
 
+def test_training_args_forces_flash_attn_off_for_npu_batch_invariant(monkeypatch):
+    monkeypatch.setattr("mcore_adapter.training_args.current_platform.is_npu", lambda: True)
+
+    args = TrainingArguments(
+        output_dir="tmp",
+        fp8="e4m3",
+        fp8_recipe="mxfp8",
+        use_flash_attn_npu_batch_invariant=True,
+    )
+
+    assert args.use_flash_attn is False
+
+
 def test_normalize_weight_for_model_update_unwraps_fp8_like_weight():
     data = torch.ones(2, 2, dtype=torch.float32)
     weight = SimpleNamespace(data=data, dtype=torch.bfloat16)

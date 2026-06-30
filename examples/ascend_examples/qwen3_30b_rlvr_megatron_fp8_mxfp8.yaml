@@ -19,7 +19,7 @@ tracker_kwargs:
   log_dir: ./rl_examples/llm/tensorboard/roll_exp/rlvr
 rpc_timeout: 72000
 
-num_gpus_per_node: 16
+num_gpus_per_node: 8
 
 max_steps: 500
 save_steps: 100
@@ -88,7 +88,6 @@ actor_train:
       expert_model_parallel_size: 1
       expert_tensor_parallel_size: 1
       use_distributed_optimizer: true
-      transformer_impl: transformer_engine
       recompute_granularity: full
       recompute_method: uniform
       recompute_num_layers: 1
@@ -96,7 +95,7 @@ actor_train:
       fp8_recipe: mxfp8
       moe_router_dtype: fp32
   use_remove_padding: true
-  device_mapping: list(range(0,16))
+  device_mapping: list(range(0,8))
   infer_batch_size: 2
 
 actor_infer:
@@ -124,7 +123,7 @@ actor_infer:
       online_quantization: ascend_mxfp8
       online_quantization_config:
         group_size: 32
-  device_mapping: list(range(0,16))
+  device_mapping: list(range(0,8))
   infer_batch_size: 1
 
 reference:
@@ -141,7 +140,7 @@ reference:
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 1
       expert_tensor_parallel_size: 1
-  device_mapping: list(range(0,16))
+  device_mapping: list(range(0,8))
   infer_batch_size: 2
 
 rewards:

@@ -19,17 +19,15 @@ from megatron.core.utils import (
 )
 from torch import Tensor
 
+from ...platforms import current_platform
 
-try:
-    import transformer_engine.pytorch as te  # noqa: F401
-
-    HAVE_TE = True
-except ImportError:
-    HAVE_TE = False
 
 te_checkpoint = None
-if HAVE_TE:
+try:
     from megatron.core.extensions.transformer_engine import te_checkpoint
+except ImportError:
+    if not current_platform.is_npu():
+        raise
 
 
 class Qwen3VLTransformerBlock(TransformerBlock):
@@ -85,6 +83,8 @@ class Qwen3VLTransformerBlock(TransformerBlock):
         def checkpoint_handler(forward_func):
             """Determines whether to use the `te_checkpoint` or `tensor_parallel.checkpoint`"""
             if self.config.fp8:
+                if te_checkpoint is None:
+                    raise RuntimeError("FP8 checkpointing requires megatron.core.extensions.transformer_engine.te_checkpoint.")
                 return te_checkpoint(
                     forward_func,
                     self.config.distribute_saved_activations,

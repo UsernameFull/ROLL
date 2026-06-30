@@ -1,10 +1,11 @@
 import re
 from typing import Callable
 
-from megatron.core.extensions.transformer_engine import TEGroupedLinear, TELayerNormColumnParallelLinear, TELinear
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.transformer.moe.router import TopKRouter
 from transformers import PreTrainedModel
+
+from .te_compat import TEGroupedLinear, TELayerNormColumnParallelLinear, TELinear
 
 
 def set_linear_is_expert(model):

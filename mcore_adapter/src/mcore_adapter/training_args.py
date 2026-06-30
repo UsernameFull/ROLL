@@ -6,6 +6,7 @@ from megatron.core.transformer.pipeline_parallel_layer_layout import PipelinePar
 from transformers import Seq2SeqTrainingArguments as HFSeq2SeqTrainingArguments
 from transformers import TrainingArguments as HFTrainingArguments
 
+from .platforms import current_platform
 from .utils import get_logger
 
 
@@ -299,6 +300,8 @@ class DistributingParallelArguments:
             self.fp8_format = self.fp8
         if self.fp8_format and self.fp8 is None:
             self.fp8 = self.fp8_format
+        if self.fp8 and self.transformer_impl == "local" and current_platform.is_npu():
+            self.transformer_impl = "transformer_engine"
         if self.fp8 and self.transformer_impl == "local":
             raise ValueError("Megatron FP8 training requires transformer_impl='transformer_engine'.")
         if self.fp8_param:

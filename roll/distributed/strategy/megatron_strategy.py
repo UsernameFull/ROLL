@@ -1,3 +1,4 @@
+import inspect
 import math
 import os
 import random
@@ -91,6 +92,33 @@ if is_peft_available():
 
 
 logger = get_logger()
+
+
+def _build_optimizer_config(args: TrainingArguments, params_dtype: torch.dtype) -> OptimizerConfig:
+    kwargs = dict(
+        optimizer=args.optimizer,
+        lr=args.learning_rate,
+        min_lr=args.lr_scheduler_kwargs.get("min_lr", 0.0) if args.lr_scheduler_kwargs is not None else 0.0,
+        weight_decay=args.weight_decay,
+        adam_beta1=args.adam_beta1,
+        adam_beta2=args.adam_beta2,
+        adam_eps=args.adam_epsilon,
+        fp16=args.fp16,
+        bf16=args.bf16,
+        params_dtype=params_dtype,
+        use_distributed_optimizer=args.use_distributed_optimizer,
+        clip_grad=args.max_grad_norm,
+    )
+    optional_kwargs = {
+        "optimizer_cpu_offload": getattr(args, "optimizer_cpu_offload", None),
+        "optimizer_offload_fraction": getattr(args, "optimizer_offload_fraction", None),
+        "fp8_recipe": getattr(args, "fp8_recipe", None),
+    }
+    supported_params = inspect.signature(OptimizerConfig).parameters
+    kwargs.update(
+        {name: value for name, value in optional_kwargs.items() if value is not None and name in supported_params}
+    )
+    return OptimizerConfig(**kwargs)
 
 
 class MegatronInferStrategy(InferenceStrategy):
@@ -1186,20 +1214,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             if self.megatron_train_args.fp16
             else torch.bfloat16 if self.megatron_train_args.bf16 else torch.float32
         )
-        optimizer_config = OptimizerConfig(
-            optimizer=self.megatron_train_args.optimizer,
-            lr=self.megatron_train_args.learning_rate,
-            min_lr=self.megatron_train_args.lr_scheduler_kwargs.get("min_lr", 0.0),
-            weight_decay=self.megatron_train_args.weight_decay,
-            adam_beta1=self.megatron_train_args.adam_beta1,
-            adam_beta2=self.megatron_train_args.adam_beta2,
-            adam_eps=self.megatron_train_args.adam_epsilon,
-            fp16=self.megatron_train_args.fp16,
-            bf16=self.megatron_train_args.bf16,
-            params_dtype=params_dtype,
-            use_distributed_optimizer=self.megatron_train_args.use_distributed_optimizer,
-            clip_grad=self.megatron_train_args.max_grad_norm,
-        )
+        optimizer_config = _build_optimizer_config(self.megatron_train_args, params_dtype)
         self.optimizer: MegatronOptimizer = get_megatron_optimizer(optimizer_config, self.models_wrapped)
 
         logger.info(f"megatron optimizer: {self.optimizer}")

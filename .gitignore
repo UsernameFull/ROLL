@@ -19,6 +19,7 @@ __pycache__/
 
 # Distribution / packaging
 .tmp/
+.tmp_research/
 .Python
 build/
 develop-eggs/

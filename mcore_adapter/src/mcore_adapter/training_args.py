@@ -266,6 +266,12 @@ class DistributingParallelArguments:
             "help": "FP8 format to use. Supported formats: 'e4m3', 'hybrid'. Do not change if unsure",
         },
     )
+    fp8_format: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Alias of fp8 used by MindSpeed-TE on Ascend. If omitted, fp8 is used.",
+        },
+    )
     additional_configs: Optional[Union[str, dict]] = field(
         default_factory=dict,
         metadata={
@@ -284,6 +290,19 @@ class DistributingParallelArguments:
 
         if self.recompute_modules is not None and isinstance(self.recompute_modules, str):
             self.recompute_modules = self.recompute_modules.split(",")
+
+        if self.fp8 and self.fp8_format and self.fp8 != self.fp8_format:
+            raise ValueError(f"fp8 ({self.fp8}) and fp8_format ({self.fp8_format}) must match when both are set.")
+        if self.fp8_recipe and not (self.fp8 or self.fp8_format):
+            raise ValueError("fp8_recipe requires fp8 or fp8_format to enable Megatron FP8 training.")
+        if self.fp8 and self.fp8_format is None:
+            self.fp8_format = self.fp8
+        if self.fp8_format and self.fp8 is None:
+            self.fp8 = self.fp8_format
+        if self.fp8 and self.transformer_impl == "local":
+            raise ValueError("Megatron FP8 training requires transformer_impl='transformer_engine'.")
+        if self.fp8_param:
+            raise ValueError("fp8_param is not supported in ROLL Megatron FP8 training yet.")
 
         logger.info(f"cuda_graph_scope before processing: {self.cuda_graph_scope}, type: {type(self.cuda_graph_scope)}")
         if self.cuda_graph_scope is not None and isinstance(self.cuda_graph_scope, str):

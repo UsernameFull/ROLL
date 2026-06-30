@@ -75,6 +75,57 @@ def apply_mindspeed_feature_defaults(config):
             setattr(config, name, value)
 
 
+def sync_mindspeed_args(args: "TrainingArguments"):
+    if "mindspeed.megatron_adaptor" not in sys.modules:
+        return
+
+    try:
+        from mindspeed.args_utils import get_mindspeed_args
+    except ImportError:
+        return
+
+    mindspeed_args = get_mindspeed_args()
+    updates = {}
+    for name in (
+        "transformer_impl",
+        "fp8",
+        "fp8_format",
+        "fp8_recipe",
+        "fp8_param",
+        "use_ascend_mc2",
+        "use_ascend_coc",
+        "use_gmm_fp8",
+        "te_comparison_with_cpu",
+        "te_comparison_with_bf16",
+    ):
+        if hasattr(args, name):
+            value = getattr(args, name)
+            if value is not None:
+                updates[name] = value
+
+    if updates.get("fp8") and "fp8_format" not in updates:
+        updates["fp8_format"] = updates["fp8"]
+    if updates.get("fp8_format") and "fp8" not in updates:
+        updates["fp8"] = updates["fp8_format"]
+    if updates.get("fp8") and "transformer_impl" not in updates:
+        updates["transformer_impl"] = "transformer_engine"
+
+    changed = False
+    for name, value in updates.items():
+        if getattr(mindspeed_args, name, None) != value:
+            setattr(mindspeed_args, name, value)
+            changed = True
+
+    if changed and updates.get("fp8"):
+        try:
+            import mindspeed.megatron_adaptor as megatron_adaptor
+
+            if hasattr(megatron_adaptor, "repatch"):
+                megatron_adaptor.repatch(updates)
+        except Exception as e:
+            logger.warning("Failed to repatch MindSpeed args for Megatron FP8: %s", e)
+
+
 def is_distribute_initialized():
     return mpu.model_parallel_is_initialized()
 
@@ -99,6 +150,7 @@ def _set_random_seed(seed_):
 
 def initialize_megatron(args: "TrainingArguments"):
     bootstrap_npu_runtime()
+    sync_mindspeed_args(args)
     if not is_distribute_initialized():
         _initialize_distributed(args)
     _set_random_seed(args.seed)

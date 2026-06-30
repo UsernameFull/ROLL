@@ -309,7 +309,10 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
     )
 
     def __post_init__(self):
-        if current_platform.is_npu() and self.transformer_impl == "transformer_engine":
+        fp8_enabled = bool(getattr(self, "fp8", None) or getattr(self, "fp8_format", None))
+        if fp8_enabled and self.transformer_impl != "transformer_engine":
+            raise ValueError("Megatron FP8 training requires transformer_impl='transformer_engine'.")
+        if current_platform.is_npu() and self.transformer_impl == "transformer_engine" and not fp8_enabled:
             self.transformer_impl = "local"
 
         if self.virtual_pipeline_model_parallel_size is None and self.overlap_p2p_comm:

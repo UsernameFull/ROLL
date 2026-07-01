@@ -50,6 +50,22 @@ def _ensure_npu_te_checkpoint_symbols(te_ext):
         pytorch_module.distributed = distributed_module
 
 
+def _patch_loaded_npu_transformer_modules(te_norm):
+    for module_name in (
+        "megatron.core.models.gpt.gpt_layer_specs",
+        "mindspeed.core.models.gpt.gpt_layer_specs",
+        "megatron.core.transformer.transformer_block",
+        "mindspeed.core.transformer.transformer_block",
+    ):
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        if getattr(module, "TENorm", None) is not te_norm:
+            setattr(module, "TENorm", te_norm)
+        if getattr(module, "te_checkpoint", None) is None:
+            setattr(module, "te_checkpoint", _npu_te_checkpoint)
+
+
 def ensure_npu_transformer_engine_symbols():
     if not current_platform.is_npu():
         return
@@ -63,15 +79,7 @@ def ensure_npu_transformer_engine_symbols():
     if getattr(te_ext, "TENorm", None) is not TENorm:
         te_ext.TENorm = TENorm
     _ensure_npu_te_checkpoint_symbols(te_ext)
-
-    for module_name in (
-        "megatron.core.models.gpt.gpt_layer_specs",
-        "mindspeed.core.models.gpt.gpt_layer_specs",
-        "mindspeed.core.transformer.transformer_block",
-    ):
-        module = sys.modules.get(module_name)
-        if module is not None and getattr(module, "TENorm", None) is not TENorm:
-            setattr(module, "TENorm", TENorm)
+    _patch_loaded_npu_transformer_modules(TENorm)
 
 
 def bootstrap_npu_runtime():

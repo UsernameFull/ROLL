@@ -19,6 +19,7 @@ from megatron.core.utils import (
 )
 from torch import Tensor
 
+from ...npu_runtime import get_te_checkpoint_or_none
 from ...platforms import current_platform
 
 
@@ -35,9 +36,8 @@ def _get_te_checkpoint():
 
     if te_checkpoint is not None:
         return te_checkpoint
-    try:
-        from megatron.core.extensions.transformer_engine import te_checkpoint as imported_te_checkpoint
-    except ImportError:
+    imported_te_checkpoint = get_te_checkpoint_or_none()
+    if imported_te_checkpoint is None:
         return None
     te_checkpoint = imported_te_checkpoint
     return te_checkpoint

@@ -278,11 +278,11 @@ def apply_npu_vllm_patches():
     import vllm
     from packaging.version import Version
 
-    _vllm_ver = Version(vllm.__version__)
+    vllm_ver = Version(vllm.__version__)
 
-    if Version("0.13.0") <= _vllm_ver <= Version("0.14.0"):
+    if Version("0.13.0") <= vllm_ver <= Version("0.14.0"):
         apply_vllm_ascend_v013_patches()
-    elif Version("0.11.0") <= _vllm_ver < Version("0.13.0"):
+    elif Version("0.11.0") <= vllm_ver < Version("0.13.0"):
         apply_vllm_ascend_v011_patches()
     else:
         logger.debug(

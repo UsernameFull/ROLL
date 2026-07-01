@@ -19,8 +19,14 @@ from roll.utils.vllm_online_quantization import apply_online_quantization_config
 
 logger = get_logger()
 
-# Apply Ascend NPU hardware compatibility patches early (before vLLM engine creation).
-if current_platform.is_npu():
+_PLATFORM_PATCHES_APPLIED = False
+
+
+def apply_platform_patches_once():
+    global _PLATFORM_PATCHES_APPLIED
+
+    if _PLATFORM_PATCHES_APPLIED or not current_platform.is_npu():
+        return
     try:
         import roll.third_party.vllm.npu_patch as npu_patch
 
@@ -28,34 +34,59 @@ if current_platform.is_npu():
         npu_patch.apply_npu_vllm_patches()
     except Exception as e:
         logger.warning("Failed to apply vLLM-Ascend NPU patches: %s", e)
+    _PLATFORM_PATCHES_APPLIED = True
 
-if Version("0.8.4") == Version(vllm.__version__):
-    import roll.third_party.vllm.vllm_0_8_4 # apply patch
-    ray_executor_class_v0 = safe_import_class("roll.third_party.vllm.vllm_0_8_4.ray_distributed_executor.CustomRayDistributedExecutor")
-    ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_8_4.v1.ray_distributed_executor.CustomRayDistributedExecutor")
-elif Version("0.10.2") == Version(vllm.__version__):
-    ray_executor_class_v0 = safe_import_class("roll.third_party.vllm.vllm_0_10_2.ray_distributed_executor.CustomRayDistributedExecutor")
-    ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_10_2.v1.ray_distributed_executor.CustomRayDistributedExecutor")
-elif Version("0.11.0") == Version(vllm.__version__) or Version("0.11.1rc1") == Version(vllm.__version__) or Version("0.11.1rc2.dev0+gc3a722fcb.d20251021") == Version(vllm.__version__):
-    ray_executor_class_v0 = safe_import_class("roll.third_party.vllm.vllm_0_11_0.ray_distributed_executor.CustomRayDistributedExecutor")
-    ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_11_0.v1.ray_distributed_executor.CustomRayDistributedExecutor")
-elif Version("0.12.0") == Version(vllm.__version__):
-    ray_executor_class_v0 = None  # V0 deprecated
-    ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_12_0.ray_distributed_executor.CustomRayDistributedExecutor")
-elif Version("0.15") <= Version(vllm.__version__):
-    if Version("0.16").release <= Version(vllm.__version__).release:
-        import roll.third_party.vllm.patch_transformers # apply patch
-    ray_executor_class_v0 = None  # V0 deprecated
-    ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.ray_distributed_executor.CustomRayDistributedExecutor")
-else:
-    ray_executor_class_v0 = None
-    ray_executor_class_v1 = None
+
+def _resolve_ray_executor_classes():
+    vllm_version = Version(vllm.__version__)
+    if vllm_version == Version("0.8.4"):
+        import roll.third_party.vllm.vllm_0_8_4  # noqa: F401
+
+        return (
+            safe_import_class("roll.third_party.vllm.vllm_0_8_4.ray_distributed_executor.CustomRayDistributedExecutor"),
+            safe_import_class(
+                "roll.third_party.vllm.vllm_0_8_4.v1.ray_distributed_executor.CustomRayDistributedExecutor"
+            ),
+        )
+    if vllm_version == Version("0.10.2"):
+        return (
+            safe_import_class("roll.third_party.vllm.vllm_0_10_2.ray_distributed_executor.CustomRayDistributedExecutor"),
+            safe_import_class(
+                "roll.third_party.vllm.vllm_0_10_2.v1.ray_distributed_executor.CustomRayDistributedExecutor"
+            ),
+        )
+    if vllm_version in (
+        Version("0.11.0"),
+        Version("0.11.1rc1"),
+        Version("0.11.1rc2.dev0+gc3a722fcb.d20251021"),
+    ):
+        return (
+            safe_import_class("roll.third_party.vllm.vllm_0_11_0.ray_distributed_executor.CustomRayDistributedExecutor"),
+            safe_import_class(
+                "roll.third_party.vllm.vllm_0_11_0.v1.ray_distributed_executor.CustomRayDistributedExecutor"
+            ),
+        )
+    if vllm_version == Version("0.12.0"):
+        return (
+            None,
+            safe_import_class("roll.third_party.vllm.vllm_0_12_0.ray_distributed_executor.CustomRayDistributedExecutor"),
+        )
+    if Version("0.15") <= vllm_version:
+        if Version("0.16").release <= vllm_version.release:
+            import roll.third_party.vllm.patch_transformers  # noqa: F401
+        return None, safe_import_class("roll.third_party.vllm.ray_distributed_executor.CustomRayDistributedExecutor")
+
     logger.warning(f"ROLL is not tested on vllm version {vllm.__version__}, something strange may happen!!!")
+    return None, None
+
+
+ray_executor_class_v0, ray_executor_class_v1 = _resolve_ray_executor_classes()
 
 logger.info(f"Using vllm version {vllm.__version__}")
 
 
 async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
+    apply_platform_patches_once()
     kwargs["enable_sleep_mode"] = True
 
     if "worker_extension_cls" not in kwargs:

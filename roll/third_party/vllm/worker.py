@@ -12,6 +12,12 @@ from packaging.version import Version
 
 from roll.platforms import current_platform
 from roll.third_party.vllm.vllm_utils import TensorLoRARequest, patch_vllm_lora_manager
+from roll.third_party.vllm.parameter_utils import (
+    TemporaryParameterSubclassTypes,
+    copy_parameter_metadata,
+    parameter_from_runtime_ref,
+    runtime_value_from_ref,
+)
 from roll.utils.collective import collective
 from roll.utils.cuda_ipc_utils import MultiprocessingSerializer
 from roll.utils.fp8 import is_mxfp8_ascend, per_block_fp8_quant_ascend
@@ -103,32 +109,7 @@ def _vllm_config_context(vllm_config):
 
 
 def _temporary_parameter_subclass_types(model: torch.nn.Module):
-    """Temporarily restore vLLM custom Parameter subclasses for load_weights.
-
-    Some vLLM model loaders branch on the actual parameter class, not only on
-    attributes attached to a plain ``torch.nn.Parameter``.  ROLL/verl keep the
-    subclass in ``param.subclass_type`` after post-loading rewrites so repeated
-    RL weight updates can still use the correct packed/sliced loaders.
-    """
-
-    class _ParameterSubclassContext:
-        def __enter__(self):
-            self._patched_params = []
-            for _name, param in model.named_parameters():
-                subclass_type = getattr(param, "subclass_type", None)
-                if subclass_type is None or param.__class__ is subclass_type:
-                    continue
-                self._patched_params.append((param, param.__class__))
-                param.__class__ = subclass_type
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            for param, original_type in reversed(self._patched_params):
-                param.__class__ = original_type
-            self._patched_params = []
-            return False
-
-    return _ParameterSubclassContext()
+    return TemporaryParameterSubclassTypes(model)
 
 
 _MXFP8_RUNTIME_TENSOR_ATTRS = (
@@ -144,6 +125,99 @@ _MXFP8_RUNTIME_TENSOR_ATTRS = (
 )
 
 
+class Mxfp8WeightLifecycle:
+    def __init__(self, model: torch.nn.Module):
+        self.model = model
+
+    def iter_runtime_modules(self):
+        from vllm.model_executor.layers.linear import LinearBase
+
+        try:
+            from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+        except ImportError:
+            from vllm.model_executor.layers.fused_moe import FusedMoE
+
+        for name, module in self.model.named_modules():
+            if not isinstance(module, (LinearBase, FusedMoE)):
+                continue
+            if not (hasattr(module, "_mxfp8_original_shapes") or hasattr(module, "_mxfp8_transformed")):
+                continue
+            yield name, module
+
+    def has_runtime_refs(self) -> bool:
+        return any(getattr(module, "_roll_mxfp8_runtime_refs", None) for _name, module in self.iter_runtime_modules())
+
+    def record_runtime_refs(self) -> int:
+        recorded = 0
+        for _name, module in self.iter_runtime_modules():
+            refs = {}
+            for attr in _MXFP8_RUNTIME_TENSOR_ATTRS:
+                tensor = _tensor_data(getattr(module, attr, None))
+                if tensor is not None:
+                    refs[attr] = tensor
+
+            if refs:
+                module._roll_mxfp8_runtime_refs = refs
+                recorded += len(refs)
+
+        if recorded > 0:
+            logger.info("MXFP8: recorded %d runtime tensor refs for graph-safe reload", recorded)
+        return recorded
+
+    def restore_runtime_refs(self) -> int:
+        restored = 0
+        errors = []
+
+        for module_name, module in self.iter_runtime_modules():
+            refs = getattr(module, "_roll_mxfp8_runtime_refs", None)
+            if not refs:
+                continue
+
+            for attr, ref in refs.items():
+                current = getattr(module, attr, None)
+                tensor = _tensor_data(current)
+                if tensor is None:
+                    errors.append(f"{module_name}.{attr}: missing transformed tensor")
+                    continue
+
+                if _tensor_signature(tensor) != _tensor_signature(ref):
+                    errors.append(
+                        f"{module_name}.{attr}: expected {_tensor_signature(ref)}, got {_tensor_signature(tensor)}"
+                    )
+                    continue
+
+                with torch.no_grad():
+                    ref.copy_(tensor, non_blocking=False)
+
+                setattr(module, attr, runtime_value_from_ref(ref, current))
+                restored += 1
+
+        if errors:
+            preview = "; ".join(errors[:5])
+            raise RuntimeError(
+                "MXFP8 graph-safe reload failed because transformed tensor metadata changed. "
+                "Use enforce_eager=True or recapture graphs through a coordinated graph lifecycle. "
+                f"First mismatches: {preview}"
+            )
+
+        if restored > 0:
+            logger.info("MXFP8: restored %d transformed tensors in-place for graph-safe reload", restored)
+        return restored
+
+    def apply_transformation_after_loading(self, preserve_runtime_refs: bool) -> bool:
+        has_runtime_refs = preserve_runtime_refs and self.has_runtime_refs()
+
+        apply_mxfp8_transformation_after_loading(self.model)
+
+        if has_runtime_refs:
+            self.restore_runtime_refs()
+            self.record_runtime_refs()
+            return True
+
+        self.record_runtime_refs()
+        return False
+
+
 def _tensor_data(value) -> Optional[torch.Tensor]:
     if isinstance(value, torch.nn.Parameter):
         return value.data
@@ -153,33 +227,15 @@ def _tensor_data(value) -> Optional[torch.Tensor]:
 
 
 def _copy_parameter_metadata(param: torch.nn.Parameter, source) -> None:
-    if not isinstance(source, torch.nn.Parameter):
-        return
-
-    base_param_attrs = set(dir(torch.nn.Parameter))
-    for attr in dir(source):
-        if attr in base_param_attrs or attr.startswith("__"):
-            continue
-        try:
-            setattr(param, attr, getattr(source, attr))
-        except (AttributeError, RuntimeError):
-            pass
-
-    subclass_type = getattr(source, "subclass_type", type(source))
-    if subclass_type is not torch.nn.Parameter:
-        param.subclass_type = subclass_type
+    copy_parameter_metadata(param, source)
 
 
 def _parameter_from_runtime_ref(ref: torch.Tensor, source) -> torch.nn.Parameter:
-    param = torch.nn.Parameter(ref, requires_grad=False)
-    _copy_parameter_metadata(param, source)
-    return param
+    return parameter_from_runtime_ref(ref, source)
 
 
 def _runtime_value_from_ref(ref: torch.Tensor, source):
-    if isinstance(source, torch.nn.Parameter):
-        return _parameter_from_runtime_ref(ref, source)
-    return ref
+    return runtime_value_from_ref(ref, source)
 
 
 def _tensor_signature(tensor: torch.Tensor) -> tuple:
@@ -193,101 +249,28 @@ def _tensor_signature(tensor: torch.Tensor) -> tuple:
 
 
 def _iter_mxfp8_runtime_modules(model: torch.nn.Module):
-    from vllm.model_executor.layers.linear import LinearBase
-
-    try:
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-    except ImportError:
-        from vllm.model_executor.layers.fused_moe import FusedMoE
-
-    for name, module in model.named_modules():
-        if not isinstance(module, (LinearBase, FusedMoE)):
-            continue
-        if not (hasattr(module, "_mxfp8_original_shapes") or hasattr(module, "_mxfp8_transformed")):
-            continue
-        yield name, module
+    yield from Mxfp8WeightLifecycle(model).iter_runtime_modules()
 
 
 def _record_mxfp8_runtime_refs(model: torch.nn.Module) -> int:
     """Remember transformed runtime tensors so graph replay can keep addresses."""
-    recorded = 0
-    for _name, module in _iter_mxfp8_runtime_modules(model):
-        refs = {}
-        for attr in _MXFP8_RUNTIME_TENSOR_ATTRS:
-            tensor = _tensor_data(getattr(module, attr, None))
-            if tensor is not None:
-                refs[attr] = tensor
-
-        if refs:
-            module._roll_mxfp8_runtime_refs = refs
-            recorded += len(refs)
-
-    if recorded > 0:
-        logger.info("MXFP8: recorded %d runtime tensor refs for graph-safe reload", recorded)
-    return recorded
+    return Mxfp8WeightLifecycle(model).record_runtime_refs()
 
 
 def _restore_mxfp8_runtime_refs(model: torch.nn.Module) -> int:
     """Copy newly transformed tensors back into the refs captured by ACL graph."""
-    restored = 0
-    errors = []
-
-    for module_name, module in _iter_mxfp8_runtime_modules(model):
-        refs = getattr(module, "_roll_mxfp8_runtime_refs", None)
-        if not refs:
-            continue
-
-        for attr, ref in refs.items():
-            current = getattr(module, attr, None)
-            tensor = _tensor_data(current)
-            if tensor is None:
-                errors.append(f"{module_name}.{attr}: missing transformed tensor")
-                continue
-
-            if _tensor_signature(tensor) != _tensor_signature(ref):
-                errors.append(
-                    f"{module_name}.{attr}: expected {_tensor_signature(ref)}, got {_tensor_signature(tensor)}"
-                )
-                continue
-
-            with torch.no_grad():
-                ref.copy_(tensor, non_blocking=False)
-
-            setattr(module, attr, _runtime_value_from_ref(ref, current))
-            restored += 1
-
-    if errors:
-        preview = "; ".join(errors[:5])
-        raise RuntimeError(
-            "MXFP8 graph-safe reload failed because transformed tensor metadata changed. "
-            "Use enforce_eager=True or recapture graphs through a coordinated graph lifecycle. "
-            f"First mismatches: {preview}"
-        )
-
-    if restored > 0:
-        logger.info("MXFP8: restored %d transformed tensors in-place for graph-safe reload", restored)
-    return restored
+    return Mxfp8WeightLifecycle(model).restore_runtime_refs()
 
 
 def _has_mxfp8_runtime_refs(model: torch.nn.Module) -> bool:
-    return any(getattr(module, "_roll_mxfp8_runtime_refs", None) for _name, module in _iter_mxfp8_runtime_modules(model))
+    return Mxfp8WeightLifecycle(model).has_runtime_refs()
 
 
 def _apply_mxfp8_transformation_after_loading(
     model: torch.nn.Module,
     preserve_runtime_refs: bool,
 ) -> bool:
-    has_runtime_refs = preserve_runtime_refs and _has_mxfp8_runtime_refs(model)
-
-    apply_mxfp8_transformation_after_loading(model)
-
-    if has_runtime_refs:
-        _restore_mxfp8_runtime_refs(model)
-        _record_mxfp8_runtime_refs(model)
-        return True
-
-    _record_mxfp8_runtime_refs(model)
-    return False
+    return Mxfp8WeightLifecycle(model).apply_transformation_after_loading(preserve_runtime_refs)
 
 
 def _clear_aclgraph_cache(obj, seen: set[int] | None = None) -> int:

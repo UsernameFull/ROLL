@@ -27,6 +27,13 @@ from roll.utils.fp8 import (
     is_mxfp8_ascend,
 )
 from roll.utils.logging import get_logger
+from roll.third_party.vllm.parameter_utils import (
+    copy_parameter_metadata,
+    parameter_from_data_and_source,
+    parameter_from_subclass_attributes,
+    replace_parameter_preserve_metadata,
+    restore_layer_parameter_metadata,
+)
 
 logger = get_logger()
 
@@ -95,35 +102,15 @@ def _resolve_quant_fn(layer: Module, quant_config):
 
 
 def _copy_param_subclass_attrs(param: Parameter, source_param) -> None:
-    if source_param is None:
-        return
-
-    base_param_attrs = set(dir(torch.nn.Parameter))
-    for attr in dir(source_param):
-        if attr in base_param_attrs or attr.startswith("__"):
-            continue
-        try:
-            setattr(param, attr, getattr(source_param, attr))
-        except (AttributeError, RuntimeError):
-            pass
-
-    subclass_type = getattr(source_param, "subclass_type", type(source_param))
-    if subclass_type is not torch.nn.Parameter:
-        param.subclass_type = subclass_type
+    copy_parameter_metadata(param, source_param)
 
 
 def _create_param_from_subclass_attributes(custom_param) -> Parameter:
-    param = Parameter(custom_param.data, requires_grad=False)
-    _copy_param_subclass_attrs(param, custom_param)
-    if type(custom_param) is not torch.nn.Parameter:
-        param.subclass_type = type(custom_param)
-    return param
+    return parameter_from_subclass_attributes(custom_param)
 
 
 def _create_param_from_data_and_source(data: torch.Tensor, source_param) -> Parameter:
-    param = Parameter(data, requires_grad=False)
-    _copy_param_subclass_attrs(param, source_param)
-    return param
+    return parameter_from_data_and_source(data, source_param)
 
 
 def _linear_scale_param(layer: Module):
@@ -133,24 +120,11 @@ def _linear_scale_param(layer: Module):
 
 
 def _replace_parameter_preserve_subclass(layer: Module, param_name: str, new_data: torch.Tensor | None) -> None:
-    if new_data is None:
-        setattr(layer, param_name, None)
-        return
-
-    if isinstance(new_data, torch.nn.Parameter):
-        new_data = new_data.data
-
-    old_param = getattr(layer, param_name, None)
-    param = Parameter(new_data, requires_grad=False)
-    _copy_param_subclass_attrs(param, old_param)
-    setattr(layer, param_name, param)
+    replace_parameter_preserve_metadata(layer, param_name, new_data)
 
 
 def _restore_layer_param_subclass_attrs(layer: Module, old_params: dict[str, Parameter]) -> None:
-    for name, old_param in old_params.items():
-        new_param = getattr(layer, name, None)
-        if isinstance(new_param, Parameter):
-            _copy_param_subclass_attrs(new_param, old_param)
+    restore_layer_parameter_metadata(layer, old_params)
 
 
 def _make_process_weights_after_loading_for_vllm20(original_fn):

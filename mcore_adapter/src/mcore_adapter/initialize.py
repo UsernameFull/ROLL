@@ -1,6 +1,7 @@
 import os
 import random
 import sys
+import types
 from typing import TYPE_CHECKING
 import importlib.util
 
@@ -25,25 +26,43 @@ def _has_megatron_training():
     return importlib.util.find_spec("megatron.training") is not None
 
 
+def _npu_te_checkpoint(function, distribute_saved_activations, get_rng_state_tracker, tp_group, *args):
+    return tensor_parallel.checkpoint(function, distribute_saved_activations, *args)
+
+
+def _ensure_npu_te_checkpoint_symbols(te_ext):
+    if not hasattr(te_ext, "te_checkpoint"):
+        te_ext.te_checkpoint = _npu_te_checkpoint
+
+    te_module = sys.modules.setdefault("transformer_engine", types.ModuleType("transformer_engine"))
+    pytorch_module = sys.modules.setdefault(
+        "transformer_engine.pytorch", types.ModuleType("transformer_engine.pytorch")
+    )
+    distributed_module = sys.modules.setdefault(
+        "transformer_engine.pytorch.distributed",
+        types.ModuleType("transformer_engine.pytorch.distributed"),
+    )
+    if not hasattr(distributed_module, "checkpoint"):
+        distributed_module.checkpoint = _npu_te_checkpoint
+    if not hasattr(te_module, "pytorch"):
+        te_module.pytorch = pytorch_module
+    if not hasattr(pytorch_module, "distributed"):
+        pytorch_module.distributed = distributed_module
+
+
 def ensure_npu_transformer_engine_symbols():
     if not current_platform.is_npu():
         return
 
     try:
         import megatron.core.extensions.transformer_engine as te_ext
-        from megatron.core import tensor_parallel
         from mindspeed.core.transformer.custom_layers.transformer_engine import TENorm
     except ImportError:
         return
 
     if getattr(te_ext, "TENorm", None) is not TENorm:
         te_ext.TENorm = TENorm
-    if not hasattr(te_ext, "te_checkpoint"):
-
-        def te_checkpoint(function, distribute_saved_activations, get_rng_state_tracker, tp_group, *args):
-            return tensor_parallel.checkpoint(function, distribute_saved_activations, *args)
-
-        te_ext.te_checkpoint = te_checkpoint
+    _ensure_npu_te_checkpoint_symbols(te_ext)
 
     for module_name in (
         "megatron.core.models.gpt.gpt_layer_specs",
@@ -67,6 +86,7 @@ def bootstrap_npu_runtime():
         import mindspeed.megatron_adaptor  # noqa: F401
     except ImportError:
         pass
+    ensure_npu_transformer_engine_symbols()
 
     import megatron.core.tensor_parallel.random as meg_random
 

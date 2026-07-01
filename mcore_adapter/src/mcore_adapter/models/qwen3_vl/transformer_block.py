@@ -30,6 +30,19 @@ except ImportError:
         raise
 
 
+def _get_te_checkpoint():
+    global te_checkpoint
+
+    if te_checkpoint is not None:
+        return te_checkpoint
+    try:
+        from megatron.core.extensions.transformer_engine import te_checkpoint as imported_te_checkpoint
+    except ImportError:
+        return None
+    te_checkpoint = imported_te_checkpoint
+    return te_checkpoint
+
+
 class Qwen3VLTransformerBlock(TransformerBlock):
     """Transformer class."""
 
@@ -83,9 +96,18 @@ class Qwen3VLTransformerBlock(TransformerBlock):
         def checkpoint_handler(forward_func):
             """Determines whether to use the `te_checkpoint` or `tensor_parallel.checkpoint`"""
             if self.config.fp8:
-                if te_checkpoint is None:
-                    raise RuntimeError("FP8 checkpointing requires megatron.core.extensions.transformer_engine.te_checkpoint.")
-                return te_checkpoint(
+                checkpoint_func = _get_te_checkpoint()
+                if checkpoint_func is None:
+                    return tensor_parallel.checkpoint(
+                        forward_func,
+                        self.config.distribute_saved_activations,
+                        hidden_states,
+                        attention_mask,
+                        context,
+                        context_mask,
+                        rotary_pos_emb,
+                    )
+                return checkpoint_func(
                     forward_func,
                     self.config.distribute_saved_activations,
                     tensor_parallel.random.get_cuda_rng_tracker,

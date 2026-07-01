@@ -31,12 +31,19 @@ def ensure_npu_transformer_engine_symbols():
 
     try:
         import megatron.core.extensions.transformer_engine as te_ext
+        from megatron.core import tensor_parallel
         from mindspeed.core.transformer.custom_layers.transformer_engine import TENorm
     except ImportError:
         return
 
     if getattr(te_ext, "TENorm", None) is not TENorm:
         te_ext.TENorm = TENorm
+    if not hasattr(te_ext, "te_checkpoint"):
+
+        def te_checkpoint(function, distribute_saved_activations, get_rng_state_tracker, tp_group, *args):
+            return tensor_parallel.checkpoint(function, distribute_saved_activations, *args)
+
+        te_ext.te_checkpoint = te_checkpoint
 
     for module_name in (
         "megatron.core.models.gpt.gpt_layer_specs",

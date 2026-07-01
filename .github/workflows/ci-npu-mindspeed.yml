@@ -1,0 +1,187 @@
+name: MindSpeed NPU Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      mindspeed_repo:
+        description: "MindSpeed git repository"
+        required: false
+        default: "https://github.com/ascend/MindSpeed.git"
+      mindspeed_ref:
+        description: "MindSpeed branch, tag, or ref to install"
+        required: false
+        default: "core_r0.16.0"
+  push:
+    branches: [main, npu_ci_all]
+    paths:
+      - ".github/workflows/ci-npu-mindspeed.yml"
+      - "mcore_adapter/**"
+      - "roll/third_party/megatron/**"
+      - "tests/third_party/megatron/**"
+      - "requirements_common.txt"
+      - "requirements_vision.txt"
+      - "setup.py"
+      - "pyproject.toml"
+  pull_request:
+    branches: [main, npu_ci_all]
+    paths:
+      - ".github/workflows/ci-npu-mindspeed.yml"
+      - "mcore_adapter/**"
+      - "roll/third_party/megatron/**"
+      - "tests/third_party/megatron/**"
+      - "requirements_common.txt"
+      - "requirements_vision.txt"
+      - "setup.py"
+      - "pyproject.toml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mindspeed-npu-test:
+    name: MindSpeed 0.16 Core NPU Tests
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: linux-aarch64-a3-8
+    timeout-minutes: 90
+    container:
+      image: quay.io/ascend/vllm-ascend:v0.18.0-a3
+    env:
+      PIP_CACHE_DIR: ${{ github.workspace }}/.pip-cache
+      PIP_INDEX_URL: https://repo.huaweicloud.com/repository/pypi/simple
+      PIP_TRUSTED_HOST: repo.huaweicloud.com
+      HF_ENDPOINT: https://hf-mirror.com
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      TASK_QUEUE_ENABLE: "2"
+      VLLM_USE_V1: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM: "0"
+      VLLM_ASCEND_ENABLE_NZ: "0"
+      MINDSPEED_REPO: ${{ github.event.inputs.mindspeed_repo || 'https://github.com/ascend/MindSpeed.git' }}
+      MINDSPEED_REF: ${{ github.event.inputs.mindspeed_ref || 'core_r0.16.0' }}
+      MINDSPEED_CACHE_KEY: "core-r0.16.0"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Cache NPU pip packages
+        uses: actions/cache@v4
+        with:
+          path: .pip-cache
+          key: ${{ runner.os }}-npu-mindspeed-${{ env.MINDSPEED_CACHE_KEY }}-${{ hashFiles('requirements_common.txt', 'requirements_vision.txt', 'mcore_adapter/pyproject.toml', 'mcore_adapter/requirements.txt', 'setup.py', 'pyproject.toml', '.github/workflows/ci-npu-mindspeed.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-npu-mindspeed-${{ env.MINDSPEED_CACHE_KEY }}-
+            ${{ runner.os }}-npu-mindspeed-
+            ${{ runner.os }}-npu-pip-
+
+      - name: Configure pip cache
+        run: |
+          mkdir -p "$PIP_CACHE_DIR"
+
+      - name: Configure Ascend runtime
+        shell: bash
+        run: |
+          for env_file in \
+            /usr/local/Ascend/ascend-toolkit/set_env.sh \
+            /usr/local/Ascend/nnal/atb/set_env.sh; do
+            [ -f "${env_file}" ] && source "${env_file}"
+          done
+
+          ASCEND_HOME_PATH="${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}"
+          ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-${ASCEND_HOME_PATH}}"
+          ASCEND_OPP_PATH="${ASCEND_OPP_PATH:-${ASCEND_HOME_PATH}/opp}"
+          ASCEND_AICPU_PATH="${ASCEND_AICPU_PATH:-${ASCEND_HOME_PATH}}"
+          LD_LIBRARY_PATH="${ASCEND_HOME_PATH}/lib64:${ASCEND_HOME_PATH}/runtime/lib64:${ASCEND_HOME_PATH}/runtime/lib64/stub:${ASCEND_HOME_PATH}/tools/hccl/lib64:${ASCEND_HOME_PATH}/hccl/lib64:${LD_LIBRARY_PATH:-}"
+
+          for path in \
+            "${ASCEND_OPP_PATH}/built-in/op_impl/ai_core/tbe" \
+            "${ASCEND_HOME_PATH}/python/site-packages"; do
+            [ -d "${path}" ] && PYTHONPATH="${path}:${PYTHONPATH:-}"
+          done
+
+          {
+            echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH}"
+            echo "ASCEND_TOOLKIT_HOME=${ASCEND_TOOLKIT_HOME}"
+            echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH}"
+            echo "ASCEND_AICPU_PATH=${ASCEND_AICPU_PATH}"
+            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
+            echo "PYTHONPATH=${PYTHONPATH:-}"
+          } >> "${GITHUB_ENV}"
+          {
+            echo "${ASCEND_HOME_PATH}/bin"
+            echo "${ASCEND_HOME_PATH}/compiler/ccec_compiler/bin"
+          } >> "${GITHUB_PATH}"
+
+      - name: Check NPU environment
+        run: |
+          python3 - <<'PY'
+          import importlib.util
+
+          import torch
+          import torch_npu
+
+          if importlib.util.find_spec("tbe") is None:
+              raise RuntimeError("CANN tbe Python module is not visible in PYTHONPATH")
+          if not torch.npu.is_available():
+              raise RuntimeError("torch.npu.is_available() is False")
+          print(f"npu_device_count={torch.npu.device_count()}")
+          PY
+
+      - name: Install ROLL requirements
+        shell: bash
+        run: |
+          python3 -m pip install --upgrade pip wheel
+          # torchair still imports pkg_resources; setuptools 82 removed it.
+          python3 -m pip install "setuptools<82"
+          python3 -m pip install --retries 10 --timeout 120 pytest-timeout
+          python3 -m pip install --retries 10 --timeout 120 -r requirements_common.txt
+          python3 -m pip install --retries 10 --timeout 120 deepspeed==0.16.4 tensorboard
+          python3 -m pip install "setuptools<82"
+          python3 -c "import pkg_resources"
+
+      - name: Install MindSpeed core_r0.16.0
+        shell: bash
+        run: |
+          set -eo pipefail
+          export MINDSPEED_SRC="/tmp/MindSpeed"
+          rm -rf "${MINDSPEED_SRC}"
+          git clone --depth 1 --branch "${MINDSPEED_REF}" "${MINDSPEED_REPO}" "${MINDSPEED_SRC}"
+          cd "${MINDSPEED_SRC}"
+          python3 -m pip install --no-build-isolation --no-deps -e .
+
+      - name: Install ROLL
+        run: |
+          python3 -m pip install -e .
+
+      - name: Prepare Megatron test model
+        shell: bash
+        run: |
+          set -eo pipefail
+          local_model="/data/cpfs_0/common/models/Qwen2.5-0.5B-Instruct"
+          if [ -d "${local_model}" ]; then
+            echo "ROLL_MEGATRON_TEST_MODEL=${local_model}" >> "${GITHUB_ENV}"
+            exit 0
+          fi
+
+          python3 - <<'PY'
+          import os
+          from huggingface_hub import snapshot_download
+
+          model_path = snapshot_download("Qwen/Qwen2.5-0.5B-Instruct")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"ROLL_MEGATRON_TEST_MODEL={model_path}\n")
+          PY
+
+      - name: Run MindSpeed Megatron offload tests
+        shell: bash
+        run: |
+          export PYTHONPATH="${GITHUB_WORKSPACE}/mcore_adapter/src:${GITHUB_WORKSPACE}:${PYTHONPATH:-}"
+          torchrun --standalone --nnodes=1 --nproc-per-node=2 \
+            -m pytest -q --tb=short tests/third_party/megatron/test_offload_states.py
+        env:
+          ROLL_NPU_CI: "1"

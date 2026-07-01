@@ -172,9 +172,6 @@ def get_thd_data_on_this_cp_rank(
     batch: Dict[str, "torch.Tensor"], packed_seq_params: PackedSeqParams, dim3_keys: List[str] = ["attention_mask"]
 ):
     """Performs sharding for Context Parallelism in THD format"""
-    import transformer_engine  # noqa: F401
-    import transformer_engine_torch as tex
-
     cp_size = mpu.get_context_parallel_world_size()
     cp_rank = mpu.get_context_parallel_rank()
     if cp_size == 1:
@@ -182,9 +179,15 @@ def get_thd_data_on_this_cp_rank(
     # length after padding
     sum_seqlen_in_batch = packed_seq_params.cu_seqlens_q_padded[-1]
     # for this cp rank, seq idx of the data after padding
-    seq_idx = tex.thd_get_partitioned_indices(
-        packed_seq_params.cu_seqlens_q_padded, sum_seqlen_in_batch, cp_size, cp_rank
-    )
+    if current_platform.is_npu():
+        seq_idx = _get_partitioned_indices(packed_seq_params.cu_seqlens_q_padded, cp_size, cp_rank)
+    else:
+        import transformer_engine  # noqa: F401
+        import transformer_engine_torch as tex
+
+        seq_idx = tex.thd_get_partitioned_indices(
+            packed_seq_params.cu_seqlens_q_padded, sum_seqlen_in_batch, cp_size, cp_rank
+        )
     for key, val in batch.items():
         if not isinstance(val, torch.Tensor):
             continue
@@ -192,6 +195,22 @@ def get_thd_data_on_this_cp_rank(
         batch[key] = batch[key].index_select(seq_dim, seq_idx)
     batch["packed_seq_params"] = packed_seq_params
     return batch
+
+
+def _get_partitioned_indices(cu_seqlens_padded: torch.Tensor, cp_size: int, cp_rank: int) -> torch.Tensor:
+    indices = []
+    for start, end in zip(cu_seqlens_padded[:-1], cu_seqlens_padded[1:]):
+        start = int(start.item())
+        end = int(end.item())
+        seq_len = end - start
+        num_chunks = 2 * cp_size
+        if seq_len % num_chunks != 0:
+            raise ValueError(f"Padded sequence length {seq_len} must be divisible by {num_chunks} for context parallel.")
+        chunk = seq_len // num_chunks
+        for chunk_rank in (cp_rank, num_chunks - cp_rank - 1):
+            chunk_start = start + chunk_rank * chunk
+            indices.append(torch.arange(chunk_start, chunk_start + chunk, device=cu_seqlens_padded.device))
+    return torch.cat(indices, dim=0)
 
 
 def configure_resized_vocab_size(

@@ -18,6 +18,8 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+.tmp/
+.tmp_research/
 .Python
 build/
 develop-eggs/

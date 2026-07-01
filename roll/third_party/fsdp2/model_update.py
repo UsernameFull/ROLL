@@ -20,6 +20,19 @@ from roll.third_party.fsdp2.qwen3_moe_patch import _iter_convert_fsdps_moe_weigh
 logger = get_logger()
 
 
+def _materialize_fsdp2_weight(weight):
+    tensor = weight.data if hasattr(weight, "data") else weight
+    if isinstance(tensor, DTensor):
+        original_device = tensor.device
+        if original_device.type == "cpu" and current_platform.device_type != "cpu":
+            tensor = tensor.to(current_platform.device_type)
+        tensor = tensor.full_tensor()
+        if original_device.type == "cpu":
+            tensor = tensor.cpu()
+        return tensor.detach()
+    return tensor.detach() if torch.is_tensor(tensor) else tensor
+
+
 def gather_fsdp2_weights(model, buffer_size, is_lora=False):
     """
     Gather FSDP2 weights for model update.
@@ -47,14 +60,14 @@ def gather_fsdp2_weights(model, buffer_size, is_lora=False):
     for name, param in params_iter:
         full_tensor_size = param.numel() * param.element_size()
         if waiting_params and waiting_params_size + full_tensor_size > buffer_size:
-            yield [(n, p.data if not isinstance(p.data, DTensor) else p.data.full_tensor()) for n, p in waiting_params]
+            yield [(n, _materialize_fsdp2_weight(p)) for n, p in waiting_params]
             waiting_params, waiting_params_size = [], 0
 
         waiting_params_size += full_tensor_size
         waiting_params.append((name, param))
 
     if waiting_params:
-        yield [(n, p.data if not isinstance(p.data, DTensor) else p.data.full_tensor()) for n, p in waiting_params]
+        yield [(n, _materialize_fsdp2_weight(p)) for n, p in waiting_params]
 
 
 class FSDP2WeightUpdater:

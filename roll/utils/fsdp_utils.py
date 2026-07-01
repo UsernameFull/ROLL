@@ -197,6 +197,8 @@ def apply_fsdp2(model, fsdp_kwargs, moe_fsdp_kwargs, config, is_lora=False):
         fsdp_transformer_layer_cls_to_wrap = []
     elif isinstance(fsdp_transformer_layer_cls_to_wrap, str):
         fsdp_transformer_layer_cls_to_wrap = [fsdp_transformer_layer_cls_to_wrap]
+    elif isinstance(fsdp_transformer_layer_cls_to_wrap, set):
+        fsdp_transformer_layer_cls_to_wrap = sorted(fsdp_transformer_layer_cls_to_wrap)
     else:
         fsdp_transformer_layer_cls_to_wrap = list(fsdp_transformer_layer_cls_to_wrap)
 
@@ -328,6 +330,7 @@ def fsdp2_load_full_state_dict(
     from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 
     device_id = current_platform.current_device()
+    cpu_offload = bool(cpu_offload)
 
     if not ep_enabled:
         if dist.get_rank() == 0:
@@ -335,10 +338,13 @@ def fsdp2_load_full_state_dict(
         else:
             model = model.to_empty(device=device_id)
 
-        cpu_offload = cpu_offload is not None
+        load_cpu_offload = cpu_offload and current_platform.device_type == "cpu"
         options = StateDictOptions(
             full_state_dict=True,
-            cpu_offload=cpu_offload,
+            # Keep accelerator collectives on the accelerator during initial
+            # FSDP2 loading. On NPU/HCCL, cpu_offload=True can leave DTensor
+            # full tensors on CPU and fail inside broadcast/distribute paths.
+            cpu_offload=load_cpu_offload,
             broadcast_from_rank0=True,
         )
         set_model_state_dict(model, full_state, options=options)
@@ -347,6 +353,8 @@ def fsdp2_load_full_state_dict(
 
     # rotary_emb is not in state_dict, so we need to broadcast it manually
     for name, buf in model.named_buffers():
+        if buf.device.type == "cpu" and current_platform.device_type != "cpu":
+            buf.data = buf.data.to(device_id, non_blocking=True)
         dist.broadcast(buf, src=0)
 
     if cpu_offload:

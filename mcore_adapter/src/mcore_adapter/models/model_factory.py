@@ -6,17 +6,12 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 import torch
 from megatron.core import mpu, tensor_parallel
 from megatron.core.models.gpt import GPTModel
-from megatron.core.models.gpt.gpt_layer_specs import (
-    get_gpt_decoder_block_spec,
-    get_gpt_layer_local_spec,
-    get_gpt_layer_with_transformer_engine_spec,
-    get_gpt_mtp_block_spec,
-)
 from megatron.core.transformer.module import MegatronModule
 from transformers.tokenization_utils import PreTrainedTokenizer
 from transformers.utils import is_peft_available
 
 from ..checkpointing import find_dist_ckpt, generate_model_state_dict, load_state_dict_from_checkpoint, save_config_and_state_dict
+from ..initialize import ensure_npu_transformer_engine_symbols
 from ..platforms import current_platform
 from ..utils import get_logger
 from .converter.convert_utils import MAX_SHARD_SIZE
@@ -42,6 +37,38 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
+
+
+def _replace_with_rmsnorm(submodules, attr_name):
+    if not hasattr(submodules, attr_name):
+        return
+    norm = getattr(submodules, attr_name)
+    norm_name = norm.__name__ if isinstance(norm, type) else norm.__class__.__name__
+    if not norm_name.endswith("RMSNorm"):
+        setattr(submodules, attr_name, RMSNorm)
+
+
+def _apply_npu_rmsnorm_overrides(module_spec, qk_layernorm: bool = False, set_layer_norm: bool = False):
+    if set_layer_norm:
+        module_spec.layer_norm = RMSNorm
+
+    _replace_with_rmsnorm(module_spec.submodules, "input_layernorm")
+    _replace_with_rmsnorm(module_spec.submodules, "pre_mlp_layernorm")
+
+    self_attn = getattr(module_spec.submodules, "self_attention", None)
+    if qk_layernorm and hasattr(self_attn, "submodules"):
+        _replace_with_rmsnorm(self_attn.submodules, "q_layernorm")
+        _replace_with_rmsnorm(self_attn.submodules, "k_layernorm")
+
+
+def _get_gpt_layer_specs():
+    from megatron.core.models.gpt.gpt_layer_specs import (
+        get_gpt_decoder_block_spec,
+        get_gpt_layer_local_spec,
+        get_gpt_mtp_block_spec,
+    )
+
+    return get_gpt_decoder_block_spec, get_gpt_layer_local_spec, get_gpt_mtp_block_spec
 
 
 class VirtualModels:
@@ -377,7 +404,10 @@ class McaGPTModel(GPTModel, PretrainedModel):
     def _get_transformer_layer_spec(self, config: Optional["McaModelConfig"] = None):
         config = config or self.config
         use_te = config.transformer_impl == "transformer_engine"
-        if config.num_moe_experts:
+        get_gpt_decoder_block_spec, get_gpt_layer_local_spec, _ = _get_gpt_layer_specs()
+        if config.num_moe_experts or (current_platform.is_npu() and use_te):
+            if current_platform.is_npu() and use_te:
+                ensure_npu_transformer_engine_symbols()
             transformer_block_spec = get_gpt_decoder_block_spec(
                 config, use_transformer_engine=use_te, vp_stage=self.vp_stage
             )
@@ -385,14 +415,34 @@ class McaGPTModel(GPTModel, PretrainedModel):
                 transformer_block_spec.layer_norm = RMSNorm
             for transformer_layer_spec in transformer_block_spec.layer_specs:
                 if not use_te and config.normalization == "RMSNorm":
-                    transformer_layer_spec.submodules.input_layernorm = RMSNorm
-                    transformer_layer_spec.submodules.pre_mlp_layernorm = RMSNorm
+                    if current_platform.is_npu():
+                        _apply_npu_rmsnorm_overrides(transformer_layer_spec)
+                    else:
+                        transformer_layer_spec.submodules.input_layernorm = RMSNorm
+                        transformer_layer_spec.submodules.pre_mlp_layernorm = RMSNorm
             return transformer_block_spec
         if use_te:
+            from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
+
             return get_gpt_layer_with_transformer_engine_spec(
                 config.num_moe_experts, config.moe_grouped_gemm, qk_layernorm=config.qk_layernorm
             )
         else:
+            if current_platform.is_npu():
+                module_spec = get_gpt_layer_local_spec(
+                    config.num_moe_experts,
+                    config.moe_grouped_gemm,
+                    qk_layernorm=config.qk_layernorm,
+                    normalization=config.normalization,
+                )
+                if config.normalization == "RMSNorm":
+                    _apply_npu_rmsnorm_overrides(
+                        module_spec,
+                        qk_layernorm=config.qk_layernorm,
+                        set_layer_norm=True,
+                    )
+                return module_spec
+
             module_spec = get_gpt_layer_local_spec(
                 config.num_moe_experts, config.moe_grouped_gemm, qk_layernorm=config.qk_layernorm
             )
@@ -406,6 +456,7 @@ class McaGPTModel(GPTModel, PretrainedModel):
         if config.mtp_num_layers and config.mtp_num_layers > 0:
             transformer_layer_spec = self._get_transformer_layer_spec(config)
             use_te = config.transformer_impl == "transformer_engine"
+            _, _, get_gpt_mtp_block_spec = _get_gpt_layer_specs()
             spec = get_gpt_mtp_block_spec(config, transformer_layer_spec, use_te, vp_stage=vp_stage)
             return spec
         else:

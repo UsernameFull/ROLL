@@ -16,7 +16,8 @@ from transformers import AutoConfig
 from transformers.configuration_utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from ..constants import HUGGINGFACE_AUTOMAP_CACHE, MCA_CONFIG_NAME
-from ..initialize import initialize_megatron
+from ..initialize import apply_mindspeed_feature_defaults, initialize_megatron
+from ..platforms import current_platform
 from ..training_args import DistributingParallelArguments, TrainingArguments
 from ..utils import get_logger
 from .converter.template import get_template
@@ -268,6 +269,18 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
         default=0,
         metadata={"help": "Maximum size of sequence. This is used for positional embedding"},
     )
+    micro_batch_size: Optional[int] = field(
+        default=None,
+        metadata={"help": "Micro batch size used by Megatron/MindSpeed attention mask generation."},
+    )
+    use_flash_attn: Optional[bool] = field(
+        default=None,
+        metadata={"help": "MindSpeed NPU flash attention switch."},
+    )
+    use_flash_attn_npu_batch_invariant: Optional[bool] = field(
+        default=None,
+        metadata={"help": "MindSpeed flash-attn-npu batch-invariant attention switch."},
+    )
     moe_use_shared_expert_gate: bool = field(
         default=False,
         metadata={"help": "Use shared expert use sigmoid gate to control shared outputs."},
@@ -308,6 +321,18 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
     )
 
     def __post_init__(self):
+        fp8_enabled = bool(getattr(self, "fp8", None) or getattr(self, "fp8_format", None))
+        if fp8_enabled and current_platform.is_npu() and self.transformer_impl == "local":
+            self.transformer_impl = "transformer_engine"
+        if fp8_enabled and self.transformer_impl != "transformer_engine":
+            raise ValueError("Megatron FP8 training requires transformer_impl='transformer_engine'.")
+        if current_platform.is_npu() and self.transformer_impl == "transformer_engine" and not fp8_enabled:
+            self.transformer_impl = "local"
+        if current_platform.is_npu() and self.transformer_impl == "transformer_engine" and self.use_flash_attn is None:
+            self.use_flash_attn = not bool(self.use_flash_attn_npu_batch_invariant)
+        if current_platform.is_npu() and self.use_flash_attn_npu_batch_invariant:
+            self.use_flash_attn = False
+
         if self.virtual_pipeline_model_parallel_size is None and self.overlap_p2p_comm:
             self.overlap_p2p_comm = False
             logger.warning("Non-interleaved pipeline parallelism does not support overlapping p2p communication!")
@@ -385,6 +410,7 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
                 pipeline_model_parallel_size=self.pipeline_model_parallel_size,
             )
 
+        apply_mindspeed_feature_defaults(self)
         super().__post_init__()
         pipeline_size = self.pipeline_model_parallel_size
         if self.virtual_pipeline_model_parallel_size is not None:

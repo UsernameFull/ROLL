@@ -1,3 +1,4 @@
+import inspect
 import math
 import os
 import random
@@ -75,6 +76,33 @@ if is_peft_available():
 
 
 logger = get_logger(__name__)
+
+
+def _build_optimizer_config(args: TrainingArguments, params_dtype: torch.dtype) -> OptimizerConfig:
+    kwargs = dict(
+        optimizer=args.optimizer,
+        lr=args.learning_rate,
+        min_lr=args.lr_scheduler_kwargs.get("min_lr", 0.0) if args.lr_scheduler_kwargs is not None else 0.0,
+        weight_decay=args.weight_decay,
+        adam_beta1=args.adam_beta1,
+        adam_beta2=args.adam_beta2,
+        adam_eps=args.adam_epsilon,
+        fp16=args.fp16,
+        bf16=args.bf16,
+        params_dtype=params_dtype,
+        use_distributed_optimizer=args.use_distributed_optimizer,
+        clip_grad=args.max_grad_norm,
+    )
+    optional_kwargs = {
+        "optimizer_cpu_offload": getattr(args, "optimizer_cpu_offload", None),
+        "optimizer_offload_fraction": getattr(args, "optimizer_offload_fraction", None),
+        "fp8_recipe": getattr(args, "fp8_recipe", None),
+    }
+    supported_params = inspect.signature(OptimizerConfig).parameters
+    kwargs.update(
+        {name: value for name, value in optional_kwargs.items() if value is not None and name in supported_params}
+    )
+    return OptimizerConfig(**kwargs)
 
 
 class McaTrainer(Trainer):
@@ -488,24 +516,7 @@ class McaTrainer(Trainer):
 
     def create_optimizer(self):
         params_dtype = torch.float16 if self.args.fp16 else torch.bfloat16 if self.args.bf16 else torch.float32
-        config = OptimizerConfig(
-            optimizer=self.args.optimizer,
-            lr=self.args.learning_rate,
-            min_lr=self.args.lr_scheduler_kwargs.get("min_lr", 0.0)
-            if self.args.lr_scheduler_kwargs is not None
-            else 0.0,
-            weight_decay=self.args.weight_decay,
-            adam_beta1=self.args.adam_beta1,
-            adam_beta2=self.args.adam_beta2,
-            adam_eps=self.args.adam_epsilon,
-            fp16=self.args.fp16,
-            bf16=self.args.bf16,
-            params_dtype=params_dtype,
-            use_distributed_optimizer=self.args.use_distributed_optimizer,
-            clip_grad=self.args.max_grad_norm,
-            optimizer_cpu_offload=self.args.optimizer_cpu_offload,
-            optimizer_offload_fraction=self.args.optimizer_offload_fraction,
-        )
+        config = _build_optimizer_config(self.args, params_dtype)
         self.optimizer = get_megatron_optimizer(config, self.models_wrapped)
         return self.optimizer
 

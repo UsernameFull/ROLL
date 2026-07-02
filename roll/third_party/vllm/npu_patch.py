@@ -114,23 +114,19 @@ def _patch_moe_comm_method_v011(fn):
     return wrapper
 
 
-def _patch_matmul_and_reduce_v011(fn):
-    """vLLM 0.11: disable mmrs_fusion on A2."""
+def _make_matmul_reduce_disable_mmrs_a2(original_fn, is_a2_check):
+    """Wrap a ``matmul_and_reduce`` method to disable mmrs_fusion on A2 hardware."""
 
-    @wraps(fn)
+    @wraps(original_fn)
     def wrapper(self, *args, **kwargs):
-        from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
-
-        soc_version = get_ascend_soc_version()
-        if soc_version in {AscendSocVersion.A2}:
+        if is_a2_check():
             from vllm.forward_context import get_forward_context
 
             try:
-                forward_context = get_forward_context()
-                forward_context.mmrs_fusion = False
+                get_forward_context().mmrs_fusion = False
             except AssertionError:
                 pass
-        return fn(self, *args, **kwargs)
+        return original_fn(self, *args, **kwargs)
 
     return wrapper
 
@@ -141,14 +137,16 @@ def apply_vllm_ascend_v011_patches():
         return
 
     try:
+        from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
         from vllm_ascend.ops.linear_op import SequenceRowParallelOp
         from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
         NPUModelRunner._select_moe_comm_method = _patch_moe_comm_method_v011(
             NPUModelRunner._select_moe_comm_method
         )
-        SequenceRowParallelOp.matmul_and_reduce = _patch_matmul_and_reduce_v011(
-            SequenceRowParallelOp.matmul_and_reduce
+        SequenceRowParallelOp.matmul_and_reduce = _make_matmul_reduce_disable_mmrs_a2(
+            SequenceRowParallelOp.matmul_and_reduce,
+            lambda: get_ascend_soc_version() in {AscendSocVersion.A2},
         )
         logger.info("Applied vLLM-Ascend 0.11 A2 MC2 patches")
     except Exception as e:
@@ -173,27 +171,6 @@ def _patch_select_moe_comm_method_v013(fn):
         if ascend_device_type in {AscendDeviceType.A2} and moe_comm_method == MoECommType.MC2:
             moe_comm_method = MoECommType.ALLGATHER
         return moe_comm_method
-
-    return wrapper
-
-
-def _patch_matmul_and_reduce_v013(fn):
-    """vLLM 0.13: disable mmrs_fusion on A2."""
-
-    @wraps(fn)
-    def wrapper(self, *args, **kwargs):
-        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
-        ascend_device_type = get_ascend_device_type()
-        if ascend_device_type in {AscendDeviceType.A2}:
-            from vllm.forward_context import get_forward_context
-
-            try:
-                forward_context = get_forward_context()
-                forward_context.mmrs_fusion = False
-            except AssertionError:
-                pass
-        return fn(self, *args, **kwargs)
 
     return wrapper
 
@@ -250,12 +227,14 @@ def apply_vllm_ascend_v013_patches():
     try:
         from vllm_ascend import ascend_forward_context
         from vllm_ascend.ops.linear_op import SequenceRowParallelOp
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
         ascend_forward_context.select_moe_comm_method = _patch_select_moe_comm_method_v013(
             ascend_forward_context.select_moe_comm_method
         )
-        SequenceRowParallelOp.matmul_and_reduce = _patch_matmul_and_reduce_v013(
-            SequenceRowParallelOp.matmul_and_reduce
+        SequenceRowParallelOp.matmul_and_reduce = _make_matmul_reduce_disable_mmrs_a2(
+            SequenceRowParallelOp.matmul_and_reduce,
+            lambda: get_ascend_device_type() in {AscendDeviceType.A2},
         )
         _patch_vllm013_rotary_emb()
         _patch_vllm013_moe_weight_loader()

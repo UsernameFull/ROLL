@@ -49,29 +49,6 @@ def _import_modeling_module(module_path: str):
         return None
 
 
-def _apply_patch(patch_name: str, module, patch_fn):
-    if module is None:
-        return
-    try:
-        patch_fn(module)
-    except Exception as exc:
-        SKIPPED_PATCHES[patch_name] = repr(exc)
-        logger.warning("Failed to apply NPU patch for %s: %s", patch_name, exc)
-        return
-    APPLIED_PATCHES.append(patch_name)
-
-
-modeling_qwen2 = _import_modeling_module("transformers.models.qwen2.modeling_qwen2")
-modeling_qwen2_5_vl = _import_modeling_module("transformers.models.qwen2_5_vl.modeling_qwen2_5_vl")
-modeling_qwen3 = _import_modeling_module("transformers.models.qwen3.modeling_qwen3")
-modeling_qwen3_moe = _import_modeling_module("transformers.models.qwen3_moe.modeling_qwen3_moe")
-modeling_qwen3_vl = _import_modeling_module("transformers.models.qwen3_vl.modeling_qwen3_vl")
-modeling_qwen3_vl_moe = _import_modeling_module("transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe")
-modeling_qwen3_next = _import_modeling_module("transformers.models.qwen3_next.modeling_qwen3_next")
-modeling_qwen3_5 = _import_modeling_module("transformers.models.qwen3_5.modeling_qwen3_5")
-modeling_qwen3_5_moe = _import_modeling_module("transformers.models.qwen3_5_moe.modeling_qwen3_5_moe")
-
-
 # ==============================================================================
 # Core NPU operator replacements
 # ==============================================================================
@@ -378,75 +355,135 @@ def qwen3_5_moe_experts_forward_npu(self, hidden_states, top_k_index, top_k_weig
 
 
 # ==============================================================================
+# Generic spec-driven patch application
+# ==============================================================================
+
+
+def _apply_npu_patch_spec(module, spec):
+    """Apply NPU operator patches from a declarative spec dictionary.
+
+    Supported spec keys:
+        norm_class:     RMSNorm class name → norm_fn (default: rms_norm_forward_npu)
+        norm_fallback:  fallback norm class checked via hasattr before norm_class
+        norm_fn:        override for the norm forward function
+        mlp_class:      MLP class name → mlp_fn (default: silu_forward_npu)
+        mlp_fn:         override for the MLP forward function
+        rope_fn:        set ``module.apply_rotary_pos_emb``
+        moe_block:      (cls_name, fn) for sparse MoE block forward
+        moe_experts:    (cls_name, fn) for MoE experts forward
+        norm_gated:     (cls_name, fn) for gated RMSNorm forward
+        replace_class:  (cls_name, replacement) for full class swap
+    """
+    # RMSNorm
+    norm_cls = spec.get("norm_class")
+    if norm_cls:
+        fallback = spec.get("norm_fallback")
+        if fallback and hasattr(module, fallback):
+            norm_cls = fallback
+        norm_fn = spec.get("norm_fn", rms_norm_forward_npu)
+        getattr(module, norm_cls).forward = norm_fn
+
+    # Gated RMSNorm
+    ng = spec.get("norm_gated")
+    if ng:
+        getattr(module, ng[0]).forward = ng[1]
+        # Also patch non-gated norm on the same module if present.
+        norm_alt = spec.get("norm_alt_gated")
+        if norm_alt:
+            getattr(module, norm_alt).forward = norm_alt[1] if len(norm_alt) > 1 else ng[1]
+
+    # MLP
+    mlp_cls = spec.get("mlp_class")
+    if mlp_cls:
+        mlp_fn = spec.get("mlp_fn", silu_forward_npu)
+        getattr(module, mlp_cls).forward = mlp_fn
+
+    # RoPE
+    rope_fn = spec.get("rope_fn")
+    if rope_fn:
+        module.apply_rotary_pos_emb = rope_fn
+
+    # MoE block
+    mb = spec.get("moe_block")
+    if mb:
+        getattr(module, mb[0]).forward = mb[1]
+
+    # MoE experts
+    me = spec.get("moe_experts")
+    if me:
+        getattr(module, me[0]).forward = me[1]
+
+    # Full class replacement
+    rc = spec.get("replace_class")
+    if rc:
+        setattr(module, rc[0], rc[1])
+
+
+# ---------------------------------------------------------------------------
+# Patch registry – add new models here
+# ---------------------------------------------------------------------------
+
+_NPU_PATCH_REGISTRY: list[tuple[str, str, dict]] = [
+    ("Qwen2", "transformers.models.qwen2.modeling_qwen2", {
+        "norm_class": "Qwen2RMSNorm", "mlp_class": "Qwen2MLP",
+        "rope_fn": apply_rotary_pos_emb_npu,
+    }),
+    ("Qwen2.5-VL", "transformers.models.qwen2_5_vl.modeling_qwen2_5_vl", {
+        "norm_class": "Qwen2_5_VLRMSNorm", "norm_fallback": "Qwen2RMSNorm",
+        "mlp_class": "Qwen2_5_VLMLP",
+    }),
+    ("Qwen3", "transformers.models.qwen3.modeling_qwen3", {
+        "norm_class": "Qwen3RMSNorm", "mlp_class": "Qwen3MLP",
+        "rope_fn": apply_rotary_pos_emb_npu,
+    }),
+    ("Qwen3-MoE", "transformers.models.qwen3_moe.modeling_qwen3_moe", {
+        "norm_class": "Qwen3MoeRMSNorm",
+        "moe_block": ("Qwen3MoeSparseMoeBlock", qwen3_moe_sparse_moe_block_forward_npu),
+        "rope_fn": apply_rotary_pos_emb_npu,
+    }),
+    ("Qwen3-VL", "transformers.models.qwen3_vl.modeling_qwen3_vl", {
+        "norm_class": "Qwen3VLTextRMSNorm", "mlp_class": "Qwen3VLTextMLP",
+    }),
+    ("Qwen3-VL-MoE", "transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe", {
+        "norm_class": "Qwen3VLMoeTextRMSNorm",
+        "replace_class": ("Qwen3VLMoeTextSparseMoeBlock", NPUQwen3VLMoeTextSparseMoeBlock),
+        "rope_fn": apply_rotary_pos_emb_npu,
+    }),
+    ("Qwen3-Next", "transformers.models.qwen3_next.modeling_qwen3_next", {
+        "norm_class": "Qwen3NextRMSNorm", "norm_fn": qwen3_next_rms_norm_forward_npu,
+        "norm_gated": ("Qwen3NextRMSNormGated", qwen3_next_rms_norm_forward_gated_npu),
+        "moe_block": ("Qwen3NextSparseMoeBlock", qwen3_next_sparse_moe_block_forward_npu),
+        "rope_fn": qwen3_next_apply_rotary_pos_emb_npu,
+    }),
+    ("Qwen3.5", "transformers.models.qwen3_5.modeling_qwen3_5", {
+        "norm_class": "Qwen3_5RMSNorm", "norm_fn": qwen3_next_rms_norm_forward_npu,
+        "norm_gated": ("Qwen3_5RMSNormGated", qwen3_next_rms_norm_forward_gated_npu),
+        "rope_fn": qwen3_next_apply_rotary_pos_emb_npu,
+    }),
+    ("Qwen3.5-MoE", "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe", {
+        "norm_class": "Qwen3_5MoeRMSNorm", "norm_fn": qwen3_next_rms_norm_forward_npu,
+        "norm_gated": ("Qwen3_5MoeRMSNormGated", qwen3_next_rms_norm_forward_gated_npu),
+        "moe_experts": ("Qwen3_5MoeExperts", qwen3_5_moe_experts_forward_npu),
+        "rope_fn": qwen3_next_apply_rotary_pos_emb_npu,
+    }),
+]
+
+
+# ==============================================================================
 # Apply all patches (side-effect on import)
 # ==============================================================================
 
-def _patch_qwen2(module):
-    module.Qwen2RMSNorm.forward = rms_norm_forward_npu
-    module.Qwen2MLP.forward = silu_forward_npu
-    module.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
-
-
-def _patch_qwen2_5_vl(module):
-    if hasattr(module, "Qwen2RMSNorm"):
-        module.Qwen2RMSNorm.forward = rms_norm_forward_npu
-    else:
-        module.Qwen2_5_VLRMSNorm.forward = rms_norm_forward_npu
-    module.Qwen2_5_VLMLP.forward = silu_forward_npu
-
-
-def _patch_qwen3(module):
-    module.Qwen3RMSNorm.forward = rms_norm_forward_npu
-    module.Qwen3MLP.forward = silu_forward_npu
-    module.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
-
-
-def _patch_qwen3_moe(module):
-    module.Qwen3MoeRMSNorm.forward = rms_norm_forward_npu
-    module.Qwen3MoeSparseMoeBlock.forward = qwen3_moe_sparse_moe_block_forward_npu
-    module.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
-
-
-def _patch_qwen3_vl(module):
-    module.Qwen3VLTextRMSNorm.forward = rms_norm_forward_npu
-    module.Qwen3VLTextMLP.forward = silu_forward_npu
-
-
-def _patch_qwen3_vl_moe(module):
-    module.Qwen3VLMoeTextSparseMoeBlock = NPUQwen3VLMoeTextSparseMoeBlock
-    module.Qwen3VLMoeTextRMSNorm.forward = rms_norm_forward_npu
-    module.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
-
-
-def _patch_qwen3_next(module):
-    module.Qwen3NextSparseMoeBlock.forward = qwen3_next_sparse_moe_block_forward_npu
-    module.Qwen3NextRMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
-    module.Qwen3NextRMSNorm.forward = qwen3_next_rms_norm_forward_npu
-    module.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu
-
-
-def _patch_qwen3_5(module):
-    module.Qwen3_5RMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
-    module.Qwen3_5RMSNorm.forward = qwen3_next_rms_norm_forward_npu
-    module.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu
-
-
-def _patch_qwen3_5_moe(module):
-    module.Qwen3_5MoeExperts.forward = qwen3_5_moe_experts_forward_npu
-    module.Qwen3_5MoeRMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
-    module.Qwen3_5MoeRMSNorm.forward = qwen3_next_rms_norm_forward_npu
-    module.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu
-
-
-_apply_patch("Qwen2", modeling_qwen2, _patch_qwen2)
-_apply_patch("Qwen2.5-VL", modeling_qwen2_5_vl, _patch_qwen2_5_vl)
-_apply_patch("Qwen3", modeling_qwen3, _patch_qwen3)
-_apply_patch("Qwen3-MoE", modeling_qwen3_moe, _patch_qwen3_moe)
-_apply_patch("Qwen3-VL", modeling_qwen3_vl, _patch_qwen3_vl)
-_apply_patch("Qwen3-VL-MoE", modeling_qwen3_vl_moe, _patch_qwen3_vl_moe)
-_apply_patch("Qwen3-Next", modeling_qwen3_next, _patch_qwen3_next)
-_apply_patch("Qwen3.5", modeling_qwen3_5, _patch_qwen3_5)
-_apply_patch("Qwen3.5-MoE", modeling_qwen3_5_moe, _patch_qwen3_5_moe)
+for _name, _module_path, _spec in _NPU_PATCH_REGISTRY:
+    _module = _import_modeling_module(_module_path)
+    if _module is None:
+        continue
+    try:
+        _apply_npu_patch_spec(_module, _spec)
+    except Exception as _exc:
+        SKIPPED_PATCHES[_name] = repr(_exc)
+        logger.warning("Failed to apply NPU patch for %s: %s", _name, _exc)
+        continue
+    APPLIED_PATCHES.append(_name)
 
 if APPLIED_PATCHES:
     logger.info("Applied NPU patches for FSDP training backend: %s", ", ".join(APPLIED_PATCHES))

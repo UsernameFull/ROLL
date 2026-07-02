@@ -226,18 +226,6 @@ def _tensor_data(value) -> Optional[torch.Tensor]:
     return None
 
 
-def _copy_parameter_metadata(param: torch.nn.Parameter, source) -> None:
-    copy_parameter_metadata(param, source)
-
-
-def _parameter_from_runtime_ref(ref: torch.Tensor, source) -> torch.nn.Parameter:
-    return parameter_from_runtime_ref(ref, source)
-
-
-def _runtime_value_from_ref(ref: torch.Tensor, source):
-    return runtime_value_from_ref(ref, source)
-
-
 def _tensor_signature(tensor: torch.Tensor) -> tuple:
     return (
         tuple(tensor.shape),
@@ -291,43 +279,32 @@ def _clear_aclgraph_cache(obj, seen: set[int] | None = None) -> int:
     seen.add(obj_id)
 
     cleared = 0
+
+    # Clear ACL graph entries directly on this object.
     entries = getattr(obj, "concrete_aclgraph_entries", None)
     if isinstance(entries, dict):
         cleared += len(entries)
         entries.clear()
 
+    # Recurse into child attributes: nn.Module children, plus any dict/list/tuple
+    # attributes that may hold graph managers / dispatchers / runners.
     if isinstance(obj, torch.nn.Module):
         for child in obj.children():
             cleared += _clear_aclgraph_cache(child, seen)
 
-    # Cover vLLM v1/v2 manager/dispatcher layouts without depending on one
-    # private class name from a specific vLLM-Ascend release.
-    for attr in (
-        "model",
-        "runnable",
-        "drafter",
-        "speculator",
-        "cudagraph_manager",
-        "graph_manager",
-        "cudagraph_dispatcher",
-        "cudagraph_runners",
-        "graph_runners",
-        "_cudagraph_runners",
-        "_graph_runners",
-    ):
-        child = getattr(obj, attr, None)
-        if child is None:
+    for attr_name in dir(obj):
+        if attr_name.startswith("_"):
             continue
-        if isinstance(child, dict):
-            for value in child.values():
-                cleared += _clear_aclgraph_cache(value, seen)
-        elif isinstance(child, (list, tuple)):
-            for value in child:
-                cleared += _clear_aclgraph_cache(value, seen)
-        else:
+        try:
+            child = getattr(obj, attr_name)
+        except Exception:
+            continue
+        if isinstance(child, (dict, list, tuple)):
+            items = child.values() if isinstance(child, dict) else child
+            for item in items:
+                cleared += _clear_aclgraph_cache(item, seen)
+        elif isinstance(child, torch.nn.Module):
             cleared += _clear_aclgraph_cache(child, seen)
-
-    return cleared
 
 
 def invalidate_aclgraph_cache_after_weight_update(model_runner) -> None:
@@ -496,6 +473,40 @@ class WorkerBase:
             self.wake_up(["weights"])
             self.weight_loaded = True
 
+    # ------------------------------------------------------------------
+    # Shared MXFP8 weight-loading helpers
+    # ------------------------------------------------------------------
+
+    def _prepare_weights_for_loading(self, model, named_params):
+        """Restore HF shapes and quantize weights for Ascend MXFP8 models."""
+        if not self._is_mxfp8_model:
+            return named_params
+        restore_mxfp8_weights_for_loading(model)
+        return _quantize_mxfp8_weights_for_loading(
+            named_params, model,
+            dtype=getattr(self.model_config, "dtype", torch.bfloat16),
+        )
+
+    def _finalize_weight_loading(self, model):
+        """Apply MXFP8 transforms and invalidate ACL graphs after load_weights."""
+        if self._is_mxfp8_model:
+            with _vllm_config_context(self.vllm_config):
+                if _apply_mxfp8_transformation_after_loading(model, preserve_runtime_refs=True):
+                    return  # graph-safe reload – no invalidation needed
+        invalidate_aclgraph_cache_after_weight_update(self.model_runner)
+
+    def _load_weights_internal(self, model, named_params):
+        """Load weights through the MXFP8 lifecycle: restore → quantize → load → finalize.
+
+        Returns the materialized weight list (after possible quantization) so
+        it can be re-used for MTP/EAGLE drafter models.
+        """
+        named_params = list(self._prepare_weights_for_loading(model, named_params))
+        with _temporary_parameter_subclass_types(model):
+            model.load_weights(weights=named_params)
+        self._finalize_weight_loading(model)
+        return named_params
+
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # before updating the parameters, we need to reinitialize the previously released model
         self.reload_model()
@@ -503,22 +514,9 @@ class WorkerBase:
 
         if vllm.__version__ < "0.8.5":
             from roll.third_party.vllm.vllm_utils import patch_vllm_moe_model_weight_loader
-
             patch_vllm_moe_model_weight_loader(model)
 
-        # Ascend MXFP8 three-phase weight loading lifecycle:
-        #   ① restore HF shapes → ② load_weights → ③ re-apply NPU transforms
-        if self._is_mxfp8_model:
-            restore_mxfp8_weights_for_loading(model)
-            weights = _quantize_mxfp8_weights_for_loading(
-                weights,
-                model,
-                dtype=getattr(self.model_config, "dtype", torch.bfloat16),
-            )
-        weights_list = list(weights)
-
-        with _temporary_parameter_subclass_types(model):
-            model.load_weights(weights=weights_list)
+        weights_list = self._load_weights_internal(model, weights)
 
         # MTP/EAGLE drafter models are separate modules and need the same live
         # weight refresh as the target model.
@@ -527,13 +525,6 @@ class WorkerBase:
             drafter_model = self.model_runner.drafter.model
             with _temporary_parameter_subclass_types(drafter_model):
                 drafter_model.load_weights(weights=weights_list)
-
-        graph_safe_update = False
-        if self._is_mxfp8_model:
-            with _vllm_config_context(self.vllm_config):
-                graph_safe_update = _apply_mxfp8_transformation_after_loading(model, preserve_runtime_refs=True)
-        if not graph_safe_update:
-            invalidate_aclgraph_cache_after_weight_update(self.model_runner)
 
     def load_states(self):
         self.reload_model()
@@ -605,54 +596,29 @@ class WorkerBase:
             return
 
         self.reload_model()
-        model = self.model_runner.model
-
-        # Ascend MXFP8 three-phase lifecycle (same as load_weights).
-        if self._is_mxfp8_model:
-            restore_mxfp8_weights_for_loading(model)
-            named_params = _quantize_mxfp8_weights_for_loading(
-                named_params,
-                model,
-                dtype=getattr(self.model_config, "dtype", torch.bfloat16),
-            )
-
-        with _temporary_parameter_subclass_types(model):
-            model.load_weights(named_params)
-
-        graph_safe_update = False
-        if self._is_mxfp8_model:
-            with _vllm_config_context(self.vllm_config):
-                graph_safe_update = _apply_mxfp8_transformation_after_loading(model, preserve_runtime_refs=True)
-        if not graph_safe_update:
-            invalidate_aclgraph_cache_after_weight_update(self.model_runner)
+        self._load_weights_internal(self.model_runner.model, named_params)
 
     def process_weights_after_loading(self):
-        processed = False
-        if Version(vllm.__version__) >= Version("0.11.1"):
-            from vllm.model_executor.model_loader.utils import process_weights_after_loading
-            from vllm.utils.torch_utils import set_default_torch_dtype
-            device_config = self.device_config
-            load_config = self.vllm_config.load_config
-            load_device = (device_config.device if load_config.device is None else load_config.device)
-            target_device = torch.device(load_device)
-            with set_default_torch_dtype(self.model_config.dtype), _vllm_config_context(self.vllm_config):
-                process_weights_after_loading(self.model_runner.model,self.model_config,target_device)
-            processed = True
-        if (Version("0.11.0") == Version(vllm.__version__) or
-                Version("0.11.1rc1") == Version(vllm.__version__) or
-                Version("0.11.1rc2.dev0+gc3a722fcb.d20251021") == Version(vllm.__version__)):
-            from vllm.model_executor.model_loader.utils import process_weights_after_loading,set_default_torch_dtype
-            device_config = self.device_config
-            load_config = self.vllm_config.load_config
-            load_device = (device_config.device if load_config.device is None else load_config.device)
-            target_device = torch.device(load_device)
-            with set_default_torch_dtype(self.model_config.dtype), _vllm_config_context(self.vllm_config):
-                process_weights_after_loading(self.model_runner.model,self.model_config,target_device)
-            processed = True
-        if processed:
-            if self._is_mxfp8_model:
-                _record_mxfp8_runtime_refs(self.model_runner.model)
-            invalidate_aclgraph_cache_after_weight_update(self.model_runner)
+        vllm_ver = Version(vllm.__version__)
+        is_supported = (
+            vllm_ver >= Version("0.11.1")
+            or vllm_ver in (Version("0.11.0"), Version("0.11.1rc1"), Version("0.11.1rc2.dev0+gc3a722fcb.d20251021"))
+        )
+        if not is_supported:
+            return
+
+        from vllm.model_executor.model_loader.utils import process_weights_after_loading
+        from vllm.utils.torch_utils import set_default_torch_dtype
+
+        load_device = self.device_config.device
+        if self.vllm_config.load_config.device is not None:
+            load_device = self.vllm_config.load_config.device
+        with set_default_torch_dtype(self.model_config.dtype), _vllm_config_context(self.vllm_config):
+            process_weights_after_loading(self.model_runner.model, self.model_config, torch.device(load_device))
+
+        if self._is_mxfp8_model:
+            _record_mxfp8_runtime_refs(self.model_runner.model)
+        invalidate_aclgraph_cache_after_weight_update(self.model_runner)
 
 
 class WorkerV1(WorkerBase):

@@ -301,121 +301,93 @@ _original_fp8_linear_process_weights_after_loading = Fp8LinearMethod.process_wei
 Fp8LinearMethod.create_weights = _fp8_linear_create_weights
 
 
-def _fp8_linear_process_weights_after_loading_vllm10(self, layer: Module) -> None:
+def _fp8_linear_process_weights_after_loading(self, layer: Module) -> None:
+    """Process FP8 linear weights after loading (vLLM 0.10–0.19).
+
+    Unified implementation that handles API differences across vLLM versions:
+    - 0.10.x: ``_maybe_pad_weight`` + manual subclass param creation
+    - 0.11.x: ``process_fp8_weight_block_strategy`` → ``weight_scale``,
+      ``maybe_post_process_fp8_weight_block`` with optional cutlass arg,
+      delete legacy ``weight_scale_inv``
+    - 0.14.x: ``process_fp8_weight_block_strategy`` → ``weight_scale_inv``,
+      ensure ``input_scale`` attribute exists
+    """
     if not getattr(self, "block_quant", bool(getattr(self.quant_config, "weight_block_size", None))):
         return
 
     assert self.quant_config.is_checkpoint_fp8_serialized
     assert self.quant_config.activation_scheme == "dynamic"
 
-    weight = self._maybe_pad_weight(layer.weight.data)
     scale_param = _linear_scale_param(layer)
-    layer.weight = _create_param_from_subclass_attributes(
-        ModelWeightParameter(
-            data=weight,
-            output_dim=0,
-            input_dim=1,
-            weight_loader=layer.weight.weight_loader,
+    vllm_ver = Version(vllm.__version__)
+
+    if vllm_ver >= Version("0.11.0"):
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            maybe_post_process_fp8_weight_block,
+            process_fp8_weight_block_strategy,
         )
-    )
-    layer.weight_scale_inv = _create_param_from_subclass_attributes(
-        BlockQuantScaleParameter(
-            data=scale_param.data,
-            output_dim=0,
-            input_dim=1,
-            weight_loader=scale_param.weight_loader,
+
+        weight_data, scale_data = process_fp8_weight_block_strategy(layer.weight, scale_param)
+
+        layer.weight = _create_param_from_subclass_attributes(
+            ModelWeightParameter(
+                data=weight_data.data,
+                output_dim=0, input_dim=1,
+                weight_loader=layer.weight.weight_loader,
+            )
         )
-    )
 
+        if vllm_ver >= Version("0.14.0"):
+            layer.weight_scale_inv = _create_param_from_subclass_attributes(
+                BlockQuantScaleParameter(
+                    data=scale_data.data,
+                    output_dim=0, input_dim=1,
+                    weight_loader=scale_param.weight_loader,
+                )
+            )
+            if not hasattr(layer, "input_scale"):
+                layer.input_scale = None
+        else:
+            layer.weight_scale = _create_param_from_subclass_attributes(
+                BlockQuantScaleParameter(
+                    data=scale_data.data,
+                    output_dim=0, input_dim=1,
+                    weight_loader=scale_param.weight_loader,
+                )
+            )
+            if hasattr(layer, "weight_scale_inv"):
+                del layer.weight_scale_inv
 
-def _fp8_linear_process_weights_after_loading_vllm11(self, layer: Module) -> None:
-    if not getattr(self, "block_quant", bool(getattr(self.quant_config, "weight_block_size", None))):
-        return
-
-    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-        maybe_post_process_fp8_weight_block,
-        process_fp8_weight_block_strategy,
-    )
-
-    assert self.quant_config.is_checkpoint_fp8_serialized
-    assert self.quant_config.activation_scheme == "dynamic"
-
-    scale_param = _linear_scale_param(layer)
-    weight, weight_scale = process_fp8_weight_block_strategy(layer.weight, scale_param)
-    layer.weight = _create_param_from_subclass_attributes(
-        ModelWeightParameter(
-            data=weight.data,
-            output_dim=0,
-            input_dim=1,
-            weight_loader=layer.weight.weight_loader,
-        )
-    )
-    layer.weight_scale = _create_param_from_subclass_attributes(
-        BlockQuantScaleParameter(
-            data=weight_scale.data,
-            output_dim=0,
-            input_dim=1,
-            weight_loader=scale_param.weight_loader,
-        )
-    )
-
-    if hasattr(layer, "weight_scale_inv"):
-        del layer.weight_scale_inv
-
-    if Version(vllm.__version__) == Version("0.11.0"):
-        maybe_post_process_fp8_weight_block(layer, self.cutlass_block_fp8_supported)
+        if vllm_ver == Version("0.11.0"):
+            maybe_post_process_fp8_weight_block(layer, self.cutlass_block_fp8_supported)
+        else:
+            maybe_post_process_fp8_weight_block(layer)
     else:
-        maybe_post_process_fp8_weight_block(layer)
-
-
-def _fp8_linear_process_weights_after_loading_vllm14(self, layer: Module) -> None:
-    if not getattr(self, "block_quant", bool(getattr(self.quant_config, "weight_block_size", None))):
-        return
-
-    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-        maybe_post_process_fp8_weight_block,
-        process_fp8_weight_block_strategy,
-    )
-
-    assert self.quant_config.is_checkpoint_fp8_serialized
-    assert self.quant_config.activation_scheme == "dynamic"
-
-    scale_param = _linear_scale_param(layer)
-    weight, weight_scale_inv = process_fp8_weight_block_strategy(layer.weight, scale_param)
-    layer.weight = _create_param_from_subclass_attributes(
-        ModelWeightParameter(
-            data=weight.data,
-            output_dim=0,
-            input_dim=1,
-            weight_loader=layer.weight.weight_loader,
+        # vLLM 0.10.x: pre-process_fp8_weight_block_strategy API.
+        weight_data = self._maybe_pad_weight(layer.weight.data)
+        layer.weight = _create_param_from_subclass_attributes(
+            ModelWeightParameter(
+                data=weight_data,
+                output_dim=0, input_dim=1,
+                weight_loader=layer.weight.weight_loader,
+            )
         )
-    )
-    layer.weight_scale_inv = _create_param_from_subclass_attributes(
-        BlockQuantScaleParameter(
-            data=weight_scale_inv.data,
-            output_dim=0,
-            input_dim=1,
-            weight_loader=scale_param.weight_loader,
+        layer.weight_scale_inv = _create_param_from_subclass_attributes(
+            BlockQuantScaleParameter(
+                data=scale_param.data,
+                output_dim=0, input_dim=1,
+                weight_loader=scale_param.weight_loader,
+            )
         )
-    )
-
-    if not hasattr(layer, "input_scale"):
-        layer.input_scale = None
-
-    maybe_post_process_fp8_weight_block(layer)
 
 
 def _select_fp8_linear_process_weights_after_loading():
-    vllm_ver = Version(vllm.__version__)
-    if vllm_ver >= Version("0.20.0"):
+    """v0.20+ delegates to upstream; earlier versions use ROLL's unified impl."""
+    if Version(vllm.__version__) >= Version("0.20.0"):
         return _make_process_weights_after_loading_for_vllm20(
             _original_fp8_linear_process_weights_after_loading
         )
-    if vllm_ver >= Version("0.14.0"):
-        return _fp8_linear_process_weights_after_loading_vllm14
-    if vllm_ver >= Version("0.11.0"):
-        return _fp8_linear_process_weights_after_loading_vllm11
-    return _fp8_linear_process_weights_after_loading_vllm10
+    return _fp8_linear_process_weights_after_loading
 
 
 Fp8LinearMethod.process_weights_after_loading = _select_fp8_linear_process_weights_after_loading()

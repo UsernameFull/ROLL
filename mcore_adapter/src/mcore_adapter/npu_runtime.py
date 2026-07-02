@@ -15,26 +15,16 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-MINDSPEED_SYNC_ARG_NAMES = (
+# Core MindSpeed args that ROLL always overrides when deriving fp8/attention settings.
+_MINDSPEED_DERIVED_ARGS = frozenset({
     "transformer_impl",
     "fp8",
     "fp8_format",
-    "fp8_recipe",
-    "fp8_param",
-    "micro_batch_size",
-    "context_parallel_size",
-    "tensor_model_parallel_size",
-    "pipeline_model_parallel_size",
-    "expert_model_parallel_size",
-    "expert_tensor_parallel_size",
-    "use_ascend_mc2",
-    "use_ascend_coc",
-    "use_gmm_fp8",
     "use_flash_attn",
     "use_flash_attn_npu_batch_invariant",
     "te_comparison_with_cpu",
     "te_comparison_with_bf16",
-)
+})
 
 _NPU_RUNTIME_BOOTSTRAPPED = False
 
@@ -173,12 +163,16 @@ def sync_mindspeed_args(args: "TrainingArguments"):
         return
 
     mindspeed_args = get_mindspeed_args()
+
+    # Auto-discover syncable args: any field present on both ROLL TrainingArguments
+    # and MindSpeed is eligible.  The derived-args set ensures fp8/attention rules
+    # are applied even when the source arg was not directly set on args.
+    mindspeed_arg_names = set(vars(get_mindspeed_args(get_defaults=True)))
     updates = {}
-    for name in MINDSPEED_SYNC_ARG_NAMES:
-        if hasattr(args, name):
-            value = getattr(args, name)
-            if value is not None:
-                updates[name] = value
+    for name in mindspeed_arg_names | _MINDSPEED_DERIVED_ARGS:
+        value = getattr(args, name, None)
+        if value is not None:
+            updates[name] = value
 
     if updates.get("fp8") and "fp8_format" not in updates:
         updates["fp8_format"] = updates["fp8"]

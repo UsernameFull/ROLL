@@ -25,6 +25,7 @@ from roll.utils.fp8 import (
     per_block_fp8_quant,
     per_block_fp8_quant_ascend,
     is_mxfp8_ascend,
+    load_mxfp8_weight,
 )
 from roll.utils.logging import get_logger
 from roll.third_party.vllm.parameter_utils import (
@@ -165,9 +166,6 @@ def _fp8_linear_weight_loader(
         elif is_mxfp8:
             # Ascend MXFP8 path: dynamic MX quant with torch_npu.
             loaded_weight = loaded_weight.to(target_device)
-            qweight, scale = per_block_fp8_quant_ascend(
-                loaded_weight, dtype=getattr(layer, "params_dtype", torch.bfloat16)
-            )
             # MXFP8 always uses "_scale" suffix on NPU.
             scale_param = _linear_scale_param(layer)
             weight_scale_inv = BlockQuantScaleParameter(
@@ -176,8 +174,9 @@ def _fp8_linear_weight_loader(
                 output_dim=0,
                 weight_loader=original_weight_loader,
             )
-            original_weight_loader(weight, qweight, *args, **kwargs)
-            original_weight_loader(weight_scale_inv, scale, *args, **kwargs)
+            load_mxfp8_weight(
+                loaded_weight, layer, weight, weight_scale_inv, original_weight_loader, *args, **kwargs
+            )
         elif layer.weight_block_size:
             # GPU blockwise FP8 path.
             loaded_weight = loaded_weight.to(target_device)
@@ -409,11 +408,9 @@ def _fp8_moe_w13_weight_loader(
         if loaded_weight.dtype == torch.float8_e4m3fn:
             original_weight_loader(layer.w13_weight, loaded_weight, *args, **kwargs)
         elif is_mxfp8:
-            qweight, scale = per_block_fp8_quant_ascend(
-                loaded_weight, dtype=getattr(layer, "params_dtype", torch.bfloat16)
+            load_mxfp8_weight(
+                loaded_weight, layer, layer.w13_weight, layer.w13_weight_scale_inv, original_weight_loader, *args, **kwargs
             )
-            original_weight_loader(layer.w13_weight, qweight, *args, **kwargs)
-            original_weight_loader(layer.w13_weight_scale_inv, scale, *args, **kwargs)
         else:
             qweight, scale = per_block_fp8_quant(loaded_weight, layer.weight_block_size)
             original_weight_loader(layer.w13_weight, qweight, *args, **kwargs)
@@ -438,11 +435,9 @@ def _fp8_moe_w2_weight_loader(
         if loaded_weight.dtype == torch.float8_e4m3fn:
             original_weight_loader(layer.w2_weight, loaded_weight, *args, **kwargs)
         elif is_mxfp8:
-            qweight, scale = per_block_fp8_quant_ascend(
-                loaded_weight, dtype=getattr(layer, "params_dtype", torch.bfloat16)
+            load_mxfp8_weight(
+                loaded_weight, layer, layer.w2_weight, layer.w2_weight_scale_inv, original_weight_loader, *args, **kwargs
             )
-            original_weight_loader(layer.w2_weight, qweight, *args, **kwargs)
-            original_weight_loader(layer.w2_weight_scale_inv, scale, *args, **kwargs)
         else:
             qweight, scale = per_block_fp8_quant(loaded_weight, layer.weight_block_size)
             original_weight_loader(layer.w2_weight, qweight, *args, **kwargs)

@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, List, Optional
 
 import torch
@@ -130,6 +130,38 @@ def per_block_fp8_quant_ascend(
     param_scale = param_scale.flatten(-2, -1)
 
     return param_lp, param_scale
+
+
+def load_mxfp8_weight(
+    loaded_weight: torch.Tensor,
+    layer: torch.nn.Module,
+    weight_param: torch.Tensor,
+    scale_param: torch.Tensor,
+    weight_loader: Callable[..., None],
+    *args: Any,
+    **kwargs: Any,
+) -> None:
+    """Quantize a BF16/FP16 weight to Ascend MXFP8 and load both qweight and scale.
+
+    Shared helper for vLLM and SGLang FP8 monkey-patches.  Eliminates the
+    duplication of the MXFP8 quantize-then-load pattern across linear, w13,
+    and w2 weight loaders.
+
+    Args:
+        loaded_weight: High-precision weight loaded from checkpoint (bf16/fp16).
+        layer: The target module (used to resolve ``params_dtype``).
+        weight_param: Weight parameter to load the quantized tensor into.
+        scale_param: Scale parameter to load the per-block scale into.
+        weight_loader: The original framework weight loader callable.
+        *args: Passed through to *weight_loader*.
+        **kwargs: Passed through to *weight_loader*.
+    """
+    qweight, scale = per_block_fp8_quant_ascend(
+        loaded_weight,
+        dtype=getattr(layer, "params_dtype", torch.bfloat16),
+    )
+    weight_loader(weight_param, qweight, *args, **kwargs)
+    weight_loader(scale_param, scale, *args, **kwargs)
 
 
 # ---------------------------------------------------------------------------

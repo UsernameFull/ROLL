@@ -280,7 +280,7 @@ class DistributingParallelArguments:
     fp8_format: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Alias of fp8 used by MindSpeed-TE on Ascend. If omitted, fp8 is used.",
+            "help": "Alias of fp8 used by MindSpeed on Ascend. If omitted, fp8 is used.",
         },
     )
     use_flash_attn: Optional[bool] = field(

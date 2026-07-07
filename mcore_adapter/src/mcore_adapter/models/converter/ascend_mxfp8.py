@@ -237,7 +237,9 @@ def get_trainable_mxfp8_state_dict_loader() -> Callable[..., dict[str, torch.Ten
 
     The loader must accept keyword arguments ``model_path``, ``config``,
     ``converter``, ``vp_stage`` and ``adapter``, then return a Megatron-Core
-    state dict for the current virtual pipeline stage.
+    state dict for the current virtual pipeline stage.  Deployments should
+    prefer ``ROLL_ASCEND_MXFP8_STATE_DICT_LOADER`` when the installed MindSpeed
+    package does not expose one of the stable entry points.
     """
     user_loader = os.getenv(_TRAINABLE_STATE_DICT_LOADER_ENV)
     if user_loader:
@@ -260,5 +262,6 @@ def require_trainable_mxfp8_state_dict_loader() -> Callable[..., dict[str, torch
         "Ascend ModelSlim MXFP8 fp8_param training requires a MindSpeed-TE loader that can materialize "
         "trainable FP8 parameters with scale metadata. ROLL detected the quantized checkpoint format, "
         "but no compatible loader was found. Set ROLL_ASCEND_MXFP8_STATE_DICT_LOADER to a callable loader "
-        "or install a MindSpeed-TE version that exposes one; ROLL will not silently dequantize to BF16."
+        "or install a MindSpeed-TE version that exposes one; "
+        "ROLL will not silently dequantize to BF16."
     )

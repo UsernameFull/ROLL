@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Core MindSpeed args that ROLL always overrides when deriving fp8/attention settings.
+# Core NPU Megatron adaptor args that ROLL always overrides when deriving fp8/attention settings.
 _MINDSPEED_DERIVED_ARGS = frozenset({
     "transformer_impl",
     "fp8",
@@ -31,6 +31,17 @@ _NPU_RUNTIME_BOOTSTRAPPED = False
 
 def _has_megatron_training():
     return importlib.util.find_spec("megatron.training") is not None
+
+
+def _import_npu_megatron_adaptor():
+    try:
+        return __import__("mindspeed.megatron_adaptor")
+    except ImportError:
+        return None
+
+
+def _npu_megatron_adaptor_loaded():
+    return "mindspeed.megatron_adaptor" in sys.modules
 
 
 def _npu_te_checkpoint(function, distribute_saved_activations, get_rng_state_tracker, tp_group, *args):
@@ -105,10 +116,7 @@ def bootstrap_npu_runtime():
 
     import torch_npu  # noqa: F401
 
-    try:
-        import mindspeed.megatron_adaptor  # noqa: F401
-    except ImportError:
-        pass
+    _import_npu_megatron_adaptor()
     ensure_npu_transformer_engine_symbols()
 
     import megatron.core.tensor_parallel.random as meg_random
@@ -140,7 +148,7 @@ def bootstrap_npu_runtime():
 
 
 def apply_mindspeed_feature_defaults(config):
-    if "mindspeed.megatron_adaptor" not in sys.modules:
+    if not _npu_megatron_adaptor_loaded():
         return
 
     try:
@@ -154,7 +162,7 @@ def apply_mindspeed_feature_defaults(config):
 
 
 def sync_mindspeed_args(args: "TrainingArguments"):
-    if "mindspeed.megatron_adaptor" not in sys.modules:
+    if not _npu_megatron_adaptor_loaded():
         return
 
     try:
@@ -194,11 +202,11 @@ def sync_mindspeed_args(args: "TrainingArguments"):
 
     if changed and current_platform.is_npu() and _has_megatron_training():
         try:
-            import mindspeed.megatron_adaptor as megatron_adaptor
+            megatron_adaptor = sys.modules.get("mindspeed.megatron_adaptor")
 
-            if hasattr(megatron_adaptor, "repatch"):
+            if megatron_adaptor is not None and hasattr(megatron_adaptor, "repatch"):
                 megatron_adaptor.repatch(updates)
         except Exception as e:
-            logger.warning("Failed to repatch MindSpeed args: %s", e)
+            logger.warning("Failed to repatch NPU Megatron adaptor args: %s", e)
     if updates.get("fp8") or updates.get("transformer_impl") == "transformer_engine":
         ensure_npu_transformer_engine_symbols()

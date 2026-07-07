@@ -1,4 +1,6 @@
 import json
+import sys
+from types import ModuleType
 
 import pytest
 import torch
@@ -99,3 +101,26 @@ def test_trainable_state_dict_loader_missing_is_explicit(monkeypatch):
 
     with pytest.raises(RuntimeError, match="will not silently dequantize to BF16"):
         require_trainable_mxfp8_state_dict_loader()
+
+
+def test_trainable_state_dict_loader_candidates_stay_minimal():
+    candidates = ascend_mxfp8._TRAINABLE_STATE_DICT_LOADER_CANDIDATES
+
+    assert candidates == (
+        "mindspeed.core.transformer.custom_layers.transformer_engine.load_modelslim_mxfp8_state_dict",
+        "mindspeed.core.transformer.custom_layers.transformer_engine.load_ascend_mxfp8_state_dict",
+    )
+
+
+def test_trainable_state_dict_loader_env_override(monkeypatch):
+    module = ModuleType("fake_mxfp8_loader")
+
+    def load_state_dict(**kwargs):
+        return {}
+
+    module.load_state_dict = load_state_dict
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setenv("ROLL_ASCEND_MXFP8_STATE_DICT_LOADER", f"{module.__name__}.load_state_dict")
+    monkeypatch.setattr(ascend_mxfp8, "_TRAINABLE_STATE_DICT_LOADER_CANDIDATES", ())
+
+    assert ascend_mxfp8.get_trainable_mxfp8_state_dict_loader() is load_state_dict

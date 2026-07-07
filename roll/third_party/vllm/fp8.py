@@ -28,7 +28,6 @@ from roll.utils.fp8 import (
 )
 from roll.utils.logging import get_logger
 from roll.third_party.vllm.parameter_utils import (
-    copy_parameter_metadata,
     parameter_from_data_and_source,
     parameter_from_subclass_attributes,
     replace_parameter_preserve_metadata,
@@ -79,8 +78,14 @@ def update_mxfp8_quant_config(vllm_config):
         return
 
     # MXFP8 configs are always pre-serialized from ROLL's perspective.
-    if hasattr(vllm_config.quant_config, "is_checkpoint_fp8_serialized"):
-        vllm_config.quant_config.is_checkpoint_fp8_serialized = True
+    for name, value in (
+        ("is_checkpoint_fp8_serialized", True),
+        ("skip_process_weights_after_loading", False),
+    ):
+        try:
+            setattr(vllm_config.quant_config, name, value)
+        except Exception:
+            logger.debug("Ascend MXFP8 quant_config does not allow setting %s", name)
 
     logger.info("Ascend MXFP8 quantization detected – using NPU dynamic MX quantization")
 
@@ -99,18 +104,6 @@ def _resolve_quant_fn(layer: Module, quant_config):
     if is_mxfp8_ascend(quant_config):
         return per_block_fp8_quant_ascend, getattr(layer, "params_dtype", torch.bfloat16)
     return per_block_fp8_quant, layer.weight_block_size
-
-
-def _copy_param_subclass_attrs(param: Parameter, source_param) -> None:
-    copy_parameter_metadata(param, source_param)
-
-
-def _create_param_from_subclass_attributes(custom_param) -> Parameter:
-    return parameter_from_subclass_attributes(custom_param)
-
-
-def _create_param_from_data_and_source(data: torch.Tensor, source_param) -> Parameter:
-    return parameter_from_data_and_source(data, source_param)
 
 
 def _linear_scale_param(layer: Module):
@@ -167,6 +160,7 @@ def _fp8_linear_weight_loader(
         )
         if loaded_weight.dtype == torch.float8_e4m3fn:
             # Already quantized – pass through unchanged.
+            loaded_weight = loaded_weight.to(target_device)
             original_weight_loader(weight, loaded_weight, *args, **kwargs)
         elif is_mxfp8:
             # Ascend MXFP8 path: dynamic MX quant with torch_npu.
@@ -255,7 +249,6 @@ def _fp8_linear_create_weights(
     if not getattr(self.quant_config, "is_checkpoint_fp8_serialized", False):
         return
 
-    assert self.quant_config.is_checkpoint_fp8_serialized
     assert self.quant_config.activation_scheme == "dynamic"
     assert not self.use_marlin  # not implemented yet, because lack weight loader for channelwise weight_scale
 
@@ -329,7 +322,7 @@ def _fp8_linear_process_weights_after_loading(self, layer: Module) -> None:
 
         weight_data, scale_data = process_fp8_weight_block_strategy(layer.weight, scale_param)
 
-        layer.weight = _create_param_from_subclass_attributes(
+        layer.weight = parameter_from_subclass_attributes(
             ModelWeightParameter(
                 data=weight_data.data,
                 output_dim=0, input_dim=1,
@@ -338,7 +331,7 @@ def _fp8_linear_process_weights_after_loading(self, layer: Module) -> None:
         )
 
         if vllm_ver >= Version("0.14.0"):
-            layer.weight_scale_inv = _create_param_from_subclass_attributes(
+            layer.weight_scale_inv = parameter_from_subclass_attributes(
                 BlockQuantScaleParameter(
                     data=scale_data.data,
                     output_dim=0, input_dim=1,
@@ -348,7 +341,7 @@ def _fp8_linear_process_weights_after_loading(self, layer: Module) -> None:
             if not hasattr(layer, "input_scale"):
                 layer.input_scale = None
         else:
-            layer.weight_scale = _create_param_from_subclass_attributes(
+            layer.weight_scale = parameter_from_subclass_attributes(
                 BlockQuantScaleParameter(
                     data=scale_data.data,
                     output_dim=0, input_dim=1,
@@ -365,14 +358,14 @@ def _fp8_linear_process_weights_after_loading(self, layer: Module) -> None:
     else:
         # vLLM 0.10.x: pre-process_fp8_weight_block_strategy API.
         weight_data = self._maybe_pad_weight(layer.weight.data)
-        layer.weight = _create_param_from_subclass_attributes(
+        layer.weight = parameter_from_subclass_attributes(
             ModelWeightParameter(
                 data=weight_data,
                 output_dim=0, input_dim=1,
                 weight_loader=layer.weight.weight_loader,
             )
         )
-        layer.weight_scale_inv = _create_param_from_subclass_attributes(
+        layer.weight_scale_inv = parameter_from_subclass_attributes(
             BlockQuantScaleParameter(
                 data=scale_param.data,
                 output_dim=0, input_dim=1,
@@ -473,7 +466,6 @@ def _fp8_moe_create_weights(
     if not getattr(self.quant_config, "is_checkpoint_fp8_serialized", False):
         return
 
-    assert self.quant_config.is_checkpoint_fp8_serialized
     assert self.quant_config.activation_scheme == "dynamic"
     assert self.quant_config.weight_block_size is not None
 
@@ -491,7 +483,7 @@ def _fp8_moe_create_weights(
     if getattr(self, "_setup_kernel", None):
         from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 
-        assert self.fp8_backend not in [
+        unsupported_backends = [
             Fp8MoeBackend.AITER,
             Fp8MoeBackend.MARLIN,
             Fp8MoeBackend.FLASHINFER_CUTLASS,
@@ -500,13 +492,7 @@ def _fp8_moe_create_weights(
             Fp8MoeBackend.DEEPGEMM,
             Fp8MoeBackend.BATCHED_DEEPGEMM,
         ]
-        assert self.fp8_backend in [
-            Fp8MoeBackend.TRITON,
-            Fp8MoeBackend.BATCHED_TRITON,
-            Fp8MoeBackend.VLLM_CUTLASS,
-            Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
-            Fp8MoeBackend.XPU,
-        ]
+        assert self.fp8_backend not in unsupported_backends
 
     # Check whether this is an Ascend MXFP8 model.
     layer._roll_mxfp8 = is_mxfp8_ascend(self.quant_config)
@@ -560,23 +546,23 @@ def _fp8_moe_process_weights_after_loading_vllm10(self, layer: Module) -> None:
         w2_weight = layer.w2_weight.data
         w2_weight_scale_inv = layer.w2_weight_scale_inv.data
 
-    layer.w13_weight = _create_param_from_data_and_source(w13_weight, layer.w13_weight)
-    layer.w13_weight_scale_inv = _create_param_from_data_and_source(
+    layer.w13_weight = parameter_from_data_and_source(w13_weight, layer.w13_weight)
+    layer.w13_weight_scale_inv = parameter_from_data_and_source(
         w13_weight_scale_inv, layer.w13_weight_scale_inv
     )
-    layer.w2_weight = _create_param_from_data_and_source(w2_weight, layer.w2_weight)
-    layer.w2_weight_scale_inv = _create_param_from_data_and_source(
+    layer.w2_weight = parameter_from_data_and_source(w2_weight, layer.w2_weight)
+    layer.w2_weight_scale_inv = parameter_from_data_and_source(
         w2_weight_scale_inv, layer.w2_weight_scale_inv
     )
 
     if self.allow_deep_gemm and not is_blackwell_deep_gemm_used():
         if _is_col_major(layer.w13_weight_scale_inv):
-            layer.w13_weight_scale_inv = _create_param_from_data_and_source(
+            layer.w13_weight_scale_inv = parameter_from_data_and_source(
                 get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv).contiguous(),
                 layer.w13_weight_scale_inv,
             )
         if _is_col_major(layer.w2_weight_scale_inv):
-            layer.w2_weight_scale_inv = _create_param_from_data_and_source(
+            layer.w2_weight_scale_inv = parameter_from_data_and_source(
                 get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv).contiguous(),
                 layer.w2_weight_scale_inv,
             )
@@ -588,12 +574,12 @@ def _fp8_moe_process_weights_after_loading_vllm10(self, layer: Module) -> None:
         requant_weight_ue8m0_inplace(layer.w2_weight.data, layer.w2_weight_scale_inv.data, block_sz)
 
         if _is_col_major(layer.w13_weight_scale_inv):
-            layer.w13_weight_scale_inv = _create_param_from_data_and_source(
+            layer.w13_weight_scale_inv = parameter_from_data_and_source(
                 get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv).contiguous(),
                 layer.w13_weight_scale_inv,
             )
         if _is_col_major(layer.w2_weight_scale_inv):
-            layer.w2_weight_scale_inv = _create_param_from_data_and_source(
+            layer.w2_weight_scale_inv = parameter_from_data_and_source(
                 get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv).contiguous(),
                 layer.w2_weight_scale_inv,
             )
@@ -633,12 +619,12 @@ def _fp8_moe_process_weights_after_loading_vllm11(self, layer: Module) -> None:
 
     if self.allow_deep_gemm and not is_deep_gemm_e8m0_used():
         if expert_weight_is_col_major(layer.w13_weight_scale_inv):
-            layer.w13_weight_scale_inv = _create_param_from_data_and_source(
+            layer.w13_weight_scale_inv = parameter_from_data_and_source(
                 get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv),
                 layer.w13_weight_scale_inv,
             )
         if expert_weight_is_col_major(layer.w2_weight_scale_inv):
-            layer.w2_weight_scale_inv = _create_param_from_data_and_source(
+            layer.w2_weight_scale_inv = parameter_from_data_and_source(
                 get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv),
                 layer.w2_weight_scale_inv,
             )
@@ -650,12 +636,12 @@ def _fp8_moe_process_weights_after_loading_vllm11(self, layer: Module) -> None:
         requant_weight_ue8m0_inplace(layer.w2_weight.data, layer.w2_weight_scale_inv.data, block_sz)
 
         if expert_weight_is_col_major(layer.w13_weight_scale_inv):
-            layer.w13_weight_scale_inv = _create_param_from_data_and_source(
+            layer.w13_weight_scale_inv = parameter_from_data_and_source(
                 get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv),
                 layer.w13_weight_scale_inv,
             )
         if expert_weight_is_col_major(layer.w2_weight_scale_inv):
-            layer.w2_weight_scale_inv = _create_param_from_data_and_source(
+            layer.w2_weight_scale_inv = parameter_from_data_and_source(
                 get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv),
                 layer.w2_weight_scale_inv,
             )
@@ -685,10 +671,10 @@ def _fp8_moe_process_weights_after_loading_vllm14(self, layer: Module) -> None:
         w2_input_scale=w2_input_scale,
     )
 
-    layer.w13_weight = _create_param_from_data_and_source(w13, layer.w13_weight)
-    layer.w2_weight = _create_param_from_data_and_source(w2, layer.w2_weight)
-    layer.w13_weight_scale_inv = _create_param_from_data_and_source(w13_scale, layer.w13_weight_scale_inv)
-    layer.w2_weight_scale_inv = _create_param_from_data_and_source(w2_scale, layer.w2_weight_scale_inv)
+    layer.w13_weight = parameter_from_data_and_source(w13, layer.w13_weight)
+    layer.w2_weight = parameter_from_data_and_source(w2, layer.w2_weight)
+    layer.w13_weight_scale_inv = parameter_from_data_and_source(w13_scale, layer.w13_weight_scale_inv)
+    layer.w2_weight_scale_inv = parameter_from_data_and_source(w2_scale, layer.w2_weight_scale_inv)
 
     self.moe_quant_config = self.get_fused_moe_quant_config(layer)
     if self.moe_quant_config:

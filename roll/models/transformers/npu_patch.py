@@ -372,6 +372,7 @@ def _apply_npu_patch_spec(module, spec):
         moe_block:      (cls_name, fn) for sparse MoE block forward
         moe_experts:    (cls_name, fn) for MoE experts forward
         norm_gated:     (cls_name, fn) for gated RMSNorm forward
+        norm_alt_gated: class name or (cls_name, fn) for alternate gated norm
         replace_class:  (cls_name, replacement) for full class swap
     """
     # RMSNorm
@@ -390,7 +391,13 @@ def _apply_npu_patch_spec(module, spec):
         # Also patch non-gated norm on the same module if present.
         norm_alt = spec.get("norm_alt_gated")
         if norm_alt:
-            getattr(module, norm_alt).forward = norm_alt[1] if len(norm_alt) > 1 else ng[1]
+            if isinstance(norm_alt, (tuple, list)):
+                norm_alt_cls = norm_alt[0]
+                norm_alt_fn = norm_alt[1] if len(norm_alt) > 1 else ng[1]
+            else:
+                norm_alt_cls = norm_alt
+                norm_alt_fn = ng[1]
+            getattr(module, norm_alt_cls).forward = norm_alt_fn
 
     # MLP
     mlp_cls = spec.get("mlp_class")

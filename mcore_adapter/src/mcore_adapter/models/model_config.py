@@ -18,6 +18,7 @@ from transformers.configuration_utils import CONFIG_NAME as HF_CONFIG_NAME
 from ..constants import HUGGINGFACE_AUTOMAP_CACHE, MCA_CONFIG_NAME
 from ..initialize import apply_mindspeed_feature_defaults, initialize_megatron
 from ..platforms import current_platform
+from ..quantization import ASCEND_MXFP8_CHECKPOINT_FORMAT
 from ..training_args import DistributingParallelArguments, TrainingArguments
 from ..utils import get_logger
 from .converter.template import get_template
@@ -319,8 +320,20 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
             "set to true when etp_size != tp_size"
         }
     )
+    quantized_checkpoint_format: Optional[Literal["ascend_mxfp8"]] = field(
+        default=None,
+        metadata={
+            "help": "Format of an already-quantized HF checkpoint. Currently only 'ascend_mxfp8' is supported."
+        },
+    )
 
     def __post_init__(self):
+        if (
+            self.quantized_checkpoint_format is not None
+            and self.quantized_checkpoint_format != ASCEND_MXFP8_CHECKPOINT_FORMAT
+        ):
+            raise ValueError(f"Unsupported quantized_checkpoint_format: {self.quantized_checkpoint_format}")
+
         fp8_enabled = bool(getattr(self, "fp8", None) or getattr(self, "fp8_format", None))
         if fp8_enabled and current_platform.is_npu() and self.transformer_impl == "local":
             self.transformer_impl = "transformer_engine"

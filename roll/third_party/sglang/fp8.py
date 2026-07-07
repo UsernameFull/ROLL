@@ -157,7 +157,7 @@ def monkey_patch_fp8_linear_method():
     ):
         original_create_weights(self, layer, input_size_per_partition, output_partition_sizes, input_size, output_size, params_dtype, **extra_weight_attrs)
         assert self.quant_config.is_checkpoint_fp8_serialized
-        assert self.block_quant, "only suuport block-wise quantization"
+        assert self.block_quant, "only support block-wise quantization"
         assert self.quant_config.weight_block_size
         assert self.quant_config.activation_scheme == "dynamic"
         assert not _is_fp8_fnuz
@@ -183,7 +183,7 @@ def monkey_patch_fp8_linear_method():
                     layer.format_ue8m0 = True
                 else:
                     layer.format_ue8m0 = False
-            except:
+            except Exception:
                 layer.format_ue8m0 = False
 
         layer.weight_block_size = self.quant_config.weight_block_size
@@ -285,7 +285,7 @@ def monkey_patch_fp8_moe_method():
     ):
         original_create_weights(self, layer, num_experts, hidden_size, intermediate_size_per_partition, params_dtype, **extra_weight_attrs)
         assert self.quant_config.is_checkpoint_fp8_serialized
-        assert self.block_quant, "only suuport block-wise quantization"
+        assert self.block_quant, "only support block-wise quantization"
         assert self.quant_config.weight_block_size
         assert self.quant_config.activation_scheme == "dynamic"
         assert not _is_fp8_fnuz
@@ -315,7 +315,7 @@ def monkey_patch_fp8_moe_method():
                     layer.format_ue8m0 = True
                 else:
                     layer.format_ue8m0 = False
-            except:
+            except Exception:
                 layer.format_ue8m0 = False
 
         # store essential config in layer for custom weight loader

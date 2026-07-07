@@ -7,6 +7,7 @@ from transformers import Seq2SeqTrainingArguments as HFSeq2SeqTrainingArguments
 from transformers import TrainingArguments as HFTrainingArguments
 
 from .platforms import current_platform
+from .quantization import ASCEND_MXFP8_CHECKPOINT_FORMAT
 from .utils import get_logger
 
 
@@ -262,8 +263,13 @@ class DistributingParallelArguments:
     )
     fp8_param: bool = field(
         default=False,
-        # TODO: fp8_param does not work with mxfp8 for now, check TE support later.
-        metadata={"help": "If true, use fp8 weights during training instead of bf16."},
+        metadata={"help": "If true, use trainable fp8 weights during Megatron training instead of bf16."},
+    )
+    quantized_checkpoint_format: Optional[Literal["ascend_mxfp8"]] = field(
+        default=None,
+        metadata={
+            "help": "Format of an already-quantized HF checkpoint. Currently only 'ascend_mxfp8' is supported."
+        },
     )
     fp8: Optional[str] = field(
         default=None,
@@ -331,7 +337,7 @@ class DistributingParallelArguments:
         if current_platform.is_npu() and self.use_flash_attn_npu_batch_invariant:
             self.use_flash_attn = False
         if self.fp8_param:
-            raise ValueError("fp8_param is not supported in ROLL Megatron FP8 training yet.")
+            self._validate_fp8_param_training()
 
         logger.info(f"cuda_graph_scope before processing: {self.cuda_graph_scope}, type: {type(self.cuda_graph_scope)}")
         if self.cuda_graph_scope is not None and isinstance(self.cuda_graph_scope, str):
@@ -357,6 +363,20 @@ class DistributingParallelArguments:
             self.virtual_pipeline_model_parallel_size = num_stages // self.pipeline_model_parallel_size
             if self.virtual_pipeline_model_parallel_size == 1:
                 self.virtual_pipeline_model_parallel_size = None
+
+    def _validate_fp8_param_training(self):
+        if not current_platform.is_npu():
+            raise ValueError("fp8_param=True is only supported for Ascend NPU ModelSlim MXFP8 checkpoints.")
+        if self.transformer_impl is None:
+            self.transformer_impl = "transformer_engine"
+        if self.transformer_impl != "transformer_engine":
+            raise ValueError("fp8_param=True requires transformer_impl='transformer_engine'.")
+        if self.fp8 != "e4m3":
+            raise ValueError("fp8_param=True requires fp8='e4m3' or fp8_format='e4m3'.")
+        if self.fp8_recipe != "mxfp8":
+            raise ValueError("fp8_param=True requires fp8_recipe='mxfp8'.")
+        if self.quantized_checkpoint_format != ASCEND_MXFP8_CHECKPOINT_FORMAT:
+            raise ValueError("fp8_param=True requires quantized_checkpoint_format='ascend_mxfp8'.")
 
     def get_config_dict(self):
         config_dict = {f.name: getattr(self, f.name) for f in fields(self) if getattr(self, f.name) is not None}

@@ -15,6 +15,11 @@ from ..initialize import ensure_npu_transformer_engine_symbols
 from ..platforms import current_platform
 from ..utils import get_logger
 from .converter.convert_utils import MAX_SHARD_SIZE
+from .converter.ascend_mxfp8 import (
+    AscendMxfp8CheckpointAdapter,
+    is_ascend_mxfp8_checkpoint_format,
+    require_trainable_mxfp8_state_dict_loader,
+)
 from .converter.model_converter import ModelConverter
 from .model_config import McaModelConfig
 from .model_utils import (
@@ -289,6 +294,16 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
                     f"{model_name_or_path} is not valid for current training, because not exists hf ckpt "
                     f"and not mca_ckpt_exist: {mca_ckpt_exist} or not dist_config_match: {dist_config_match}"
                 )
+            mxfp8_adapter = None
+            mxfp8_state_dict_loader = None
+            if is_ascend_mxfp8_checkpoint_format(getattr(config, "quantized_checkpoint_format", None)):
+                if not getattr(config, "fp8_param", False):
+                    raise ValueError(
+                        "Loading an Ascend ModelSlim MXFP8 checkpoint for Megatron training requires fp8_param=True."
+                    )
+                mxfp8_adapter = AscendMxfp8CheckpointAdapter.from_model_path(model_name_or_path)
+                mxfp8_state_dict_loader = require_trainable_mxfp8_state_dict_loader()
+
             state_dict = {}
             converter = ModelConverter(config, resized_vocab_size=resized_vocab_size)
             for i in range(len(models)):
@@ -296,7 +311,16 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
                 if len(models) > 1:
                     mpu.set_virtual_pipeline_model_parallel_rank(i)
                     key = f"{key}{i}"
-                state_dict[key] = converter.load_mca_state_dict_from_hf(model_name_or_path, vp_stage=i)
+                if mxfp8_adapter is not None:
+                    state_dict[key] = mxfp8_state_dict_loader(
+                        model_path=model_name_or_path,
+                        config=config,
+                        converter=converter,
+                        vp_stage=i,
+                        adapter=mxfp8_adapter,
+                    )
+                else:
+                    state_dict[key] = converter.load_mca_state_dict_from_hf(model_name_or_path, vp_stage=i)
         missing_keys, unexpected_keys = models.load_state_dict(state_dict, strict=False)
         if missing_keys:
             missing_keys = [key for key in missing_keys if not key.endswith("._extra_state")]

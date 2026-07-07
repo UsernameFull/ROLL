@@ -19,9 +19,46 @@ def test_training_args_rejects_mismatched_fp8_aliases():
         TrainingArguments(output_dir="tmp", fp8="e4m3", fp8_format="hybrid", fp8_recipe="mxfp8")
 
 
-def test_training_args_rejects_fp8_param():
-    with pytest.raises(ValueError, match="fp8_param is not supported"):
+def test_training_args_rejects_fp8_param_without_npu():
+    with pytest.raises(ValueError, match="only supported for Ascend NPU"):
         TrainingArguments(output_dir="tmp", fp8="e4m3", fp8_recipe="mxfp8", fp8_param=True)
+
+
+def test_training_args_accepts_ascend_mxfp8_fp8_param(monkeypatch):
+    monkeypatch.setattr("mcore_adapter.training_args.current_platform.is_npu", lambda: True)
+
+    args = TrainingArguments(
+        output_dir="tmp",
+        fp8="e4m3",
+        fp8_recipe="mxfp8",
+        fp8_param=True,
+        quantized_checkpoint_format="ascend_mxfp8",
+    )
+
+    assert args.fp8 == "e4m3"
+    assert args.fp8_format == "e4m3"
+    assert args.fp8_recipe == "mxfp8"
+    assert args.transformer_impl == "transformer_engine"
+
+
+def test_training_args_rejects_fp8_param_without_quantized_checkpoint_format(monkeypatch):
+    monkeypatch.setattr("mcore_adapter.training_args.current_platform.is_npu", lambda: True)
+
+    with pytest.raises(ValueError, match="quantized_checkpoint_format='ascend_mxfp8'"):
+        TrainingArguments(output_dir="tmp", fp8="e4m3", fp8_recipe="mxfp8", fp8_param=True)
+
+
+def test_training_args_rejects_fp8_param_without_mxfp8_recipe(monkeypatch):
+    monkeypatch.setattr("mcore_adapter.training_args.current_platform.is_npu", lambda: True)
+
+    with pytest.raises(ValueError, match="fp8_recipe='mxfp8'"):
+        TrainingArguments(
+            output_dir="tmp",
+            fp8="e4m3",
+            fp8_recipe="delayed",
+            fp8_param=True,
+            quantized_checkpoint_format="ascend_mxfp8",
+        )
 
 
 def test_training_args_rejects_fp8_recipe_without_fp8_format():

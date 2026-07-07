@@ -7,6 +7,7 @@ from roll.utils.vllm_online_quantization import (
     FLOAT_QUANT_TYPE,
     apply_online_quantization_config,
     build_ascend_mxfp8_quant_description,
+    default_load_format_for_quantization,
 )
 
 
@@ -74,3 +75,16 @@ def test_apply_online_quantization_config_rejects_conflicting_quantization():
 
     with pytest.raises(ValueError, match="requires strategy_config.quantization"):
         apply_online_quantization_config(kwargs, hf_config=SimpleNamespace(model_type="qwen3", num_hidden_layers=1))
+
+
+def test_prequantized_ascend_defaults_to_auto_load_format():
+    assert default_load_format_for_quantization({"quantization": "ascend"}) == "auto"
+
+
+def test_online_ascend_mxfp8_defaults_to_dummy_load_format():
+    assert (
+        default_load_format_for_quantization(
+            {"quantization": "ascend", "online_quantization": "ascend_mxfp8"}
+        )
+        == "dummy"
+    )

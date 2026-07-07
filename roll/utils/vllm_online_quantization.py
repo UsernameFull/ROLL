@@ -18,6 +18,16 @@ _ROUTER_PROJECTIONS = ("gate", "router")
 _TEXT_CONFIG_ATTRS = ("text_config", "llm_config", "language_config")
 
 
+def default_load_format_for_quantization(kwargs: Mapping[str, Any]) -> str:
+    """Return ROLL's default vLLM load_format for quantized rollout configs."""
+    online_quantization = kwargs.get("online_quantization")
+    if online_quantization not in (None, False, ""):
+        return "dummy"
+    if kwargs.get("quantization") == "ascend":
+        return "auto"
+    return "dummy"
+
+
 def _get_config_value(config: Any, names: tuple[str, ...], default: Any = None) -> Any:
     for name in names:
         value = getattr(config, name, None)

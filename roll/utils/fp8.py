@@ -1,4 +1,5 @@
-from typing import List, Optional
+from collections.abc import Mapping
+from typing import Any, List, Optional
 
 import torch
 
@@ -29,6 +30,18 @@ def is_npu_available() -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _get_quant_config_value(quant_config: Any, key: str, default: Any = None) -> Any:
+    if isinstance(quant_config, Mapping):
+        return quant_config.get(key, default)
+    return getattr(quant_config, key, default)
+
+
+def _is_ascend_quant_description(quant_description: Any) -> bool:
+    if isinstance(quant_description, Mapping):
+        return str(quant_description.get("quant_method", "")).lower() == "ascend"
+    return False
+
+
 def is_mxfp8_ascend(quant_config) -> bool:
     """Detect whether the quant_config represents an Ascend MXFP8 configuration.
 
@@ -44,20 +57,25 @@ def is_mxfp8_ascend(quant_config) -> bool:
     if quant_config is None:
         return False
 
-    quant_description = getattr(quant_config, "quant_description", None)
-    if isinstance(quant_description, dict) and quant_description.get("quant_method") == "ascend":
+    if str(_get_quant_config_value(quant_config, "quant_method", "")).lower() == "ascend":
+        return True
+
+    if _is_ascend_quant_description(_get_quant_config_value(quant_config, "quant_description")):
+        return True
+
+    quantization_config = _get_quant_config_value(quant_config, "quantization_config")
+    if _is_ascend_quant_description(quantization_config):
         return True
 
     try:
         from vllm_ascend.quantization.modelslim_config import AscendModelSlimConfig
-
-        if isinstance(quant_config, AscendModelSlimConfig):
-            quant_method = quant_config.quant_description.get("quant_method")
-            return quant_method in ["ascend"]
     except ImportError:
-        pass
+        return False
 
-    return False
+    if not isinstance(quant_config, AscendModelSlimConfig):
+        return False
+
+    return _is_ascend_quant_description(getattr(quant_config, "quant_description", None))
 
 
 # ---------------------------------------------------------------------------
@@ -131,10 +149,6 @@ def per_block_fp8_quant(param_value: torch.Tensor, weight_block_size: List[int])
     """
     Quantizes weights to FP8 format using Block-wise quantization
     """
-    # Get FP8 min/max values
-    fp8_min = torch.finfo(torch.float8_e4m3fn).min
-    fp8_max = torch.finfo(torch.float8_e4m3fn).max
-
     block_size_m, block_size_n = weight_block_size
 
     rows, cols = param_value.shape[-2:]
@@ -151,12 +165,12 @@ def per_block_fp8_quant(param_value: torch.Tensor, weight_block_size: List[int])
 
     # Calculate scaling factor for each block
     max_abs = torch.amax(torch.abs(param_value), dim=(-1, -2))
-    scale = fp8_max / max_abs
+    scale = FP8_MAX / max_abs
     scale_orig_shape = scale.shape
     scale = scale.unsqueeze(-1).unsqueeze(-1)
 
     # Quantize the weights
-    quantized_param = torch.clamp(param_value * scale, min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+    quantized_param = torch.clamp(param_value * scale, min=FP8_MIN, max=FP8_MAX).to(FP8_DTYPE)
 
     quantized_param = quantized_param.permute(0, 1, 3, 2, 4)
     # Reshape back to matrix shape

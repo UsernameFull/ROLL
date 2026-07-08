@@ -19,7 +19,6 @@ from roll.utils.vllm_online_quantization import apply_online_quantization_config
 
 logger = get_logger()
 
-_PLATFORM_PATCHES_APPLIED = False
 _MIN_NPU_VLLM_VERSION = Version("0.18.0")
 
 
@@ -30,22 +29,6 @@ def _raise_if_unsupported_npu_vllm(vllm_version: Version) -> None:
             f"detected vLLM {vllm.__version__}. Legacy vLLM-Ascend compatibility code "
             "for older releases has been removed."
         )
-
-
-def apply_platform_patches_once():
-    global _PLATFORM_PATCHES_APPLIED
-
-    if _PLATFORM_PATCHES_APPLIED or not current_platform.is_npu():
-        return
-    try:
-        import roll.third_party.vllm.npu_patch as npu_patch
-
-        npu_patch.check_vllm_ascend_before_server_launch()
-        npu_patch.apply_npu_vllm_patches()
-    except Exception as e:
-        logger.error("Failed to initialize vLLM-Ascend NPU runtime checks: %s", e)
-        raise
-    _PLATFORM_PATCHES_APPLIED = True
 
 
 def _resolve_ray_executor_classes():
@@ -105,7 +88,7 @@ logger.info(f"Using vllm version {vllm.__version__}")
 
 
 async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
-    apply_platform_patches_once()
+    _raise_if_unsupported_npu_vllm(Version(vllm.__version__))
     kwargs["enable_sleep_mode"] = True
 
     if "worker_extension_cls" not in kwargs:

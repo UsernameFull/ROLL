@@ -292,12 +292,12 @@ def _clear_aclgraph_cache(obj, seen: set[int] | None = None) -> int:
         for child in obj.children():
             cleared += _clear_aclgraph_cache(child, seen)
 
-    for attr_name in dir(obj):
+    try:
+        obj_vars = vars(obj)
+    except TypeError:
+        obj_vars = {}
+    for attr_name, child in obj_vars.items():
         if attr_name.startswith("_"):
-            continue
-        try:
-            child = getattr(obj, attr_name)
-        except Exception:
             continue
         if isinstance(child, (dict, list, tuple)):
             items = child.values() if isinstance(child, dict) else child
@@ -305,6 +305,7 @@ def _clear_aclgraph_cache(obj, seen: set[int] | None = None) -> int:
                 cleared += _clear_aclgraph_cache(item, seen)
         elif isinstance(child, torch.nn.Module):
             cleared += _clear_aclgraph_cache(child, seen)
+    return cleared
 
 
 def invalidate_aclgraph_cache_after_weight_update(model_runner) -> None:
@@ -365,6 +366,19 @@ def _get_module_from_param_name(model: torch.nn.Module, name: str) -> Optional[t
     return current_module
 
 
+# Router/gate weights in MoE models should stay in full precision (FLOAT).
+# These names match vLLM's packed-module naming for Qwen-MoE, Mixtral, etc.
+_MOE_ROUTER_WEIGHT_NAME_SUFFIXES = (
+    ".gate.weight",
+    ".router.weight",
+    ".shared_expert_gate.weight",
+)
+
+
+def _is_moe_router_weight(name: str) -> bool:
+    return any(name.endswith(suffix) for suffix in _MOE_ROUTER_WEIGHT_NAME_SUFFIXES)
+
+
 def _is_mxfp8_weight_name(
     name: str,
     model: torch.nn.Module,
@@ -374,6 +388,8 @@ def _is_mxfp8_weight_name(
     if name not in seen_params:
         seen_params.add(name)
         if not name.endswith("weight"):
+            return False
+        if _is_moe_router_weight(name):
             return False
 
         from vllm.model_executor.layers.linear import LinearBase
@@ -462,6 +478,11 @@ class WorkerBase:
         # Detect MXFP8 once at init time.
         quant_config = _quant_config_from_model(self.model_runner)
         self._is_mxfp8_model: bool = is_mxfp8_ascend(quant_config)
+        # Tracks whether NPU layout transformations have been applied to the
+        # current model weights.  False until the first process_weights_after_loading
+        # or _finalize_weight_loading call; used to skip the restore step on the
+        # very first RL weight sync (nothing to restore yet).
+        self._mxfp8_transformation_applied: bool = False
         logger.info(
             "MXFP8 worker detection: enabled=%s quant_config=%s",
             self._is_mxfp8_model,
@@ -478,10 +499,16 @@ class WorkerBase:
     # ------------------------------------------------------------------
 
     def _prepare_weights_for_loading(self, model, named_params):
-        """Restore HF shapes and quantize weights for Ascend MXFP8 models."""
+        """Restore HF shapes and quantize weights for Ascend MXFP8 models.
+
+        The restore step is skipped on the very first weight sync because
+        process_weights_after_loading has not run yet (no NPU layout
+        transformations applied), so there is nothing to undo.
+        """
         if not self._is_mxfp8_model:
             return named_params
-        restore_mxfp8_weights_for_loading(model)
+        if self._mxfp8_transformation_applied:
+            restore_mxfp8_weights_for_loading(model)
         return _quantize_mxfp8_weights_for_loading(
             named_params, model,
             dtype=getattr(self.model_config, "dtype", torch.bfloat16),
@@ -490,6 +517,7 @@ class WorkerBase:
     def _finalize_weight_loading(self, model):
         """Apply MXFP8 transforms and invalidate ACL graphs after load_weights."""
         if self._is_mxfp8_model:
+            self._mxfp8_transformation_applied = True
             with _vllm_config_context(self.vllm_config):
                 if _apply_mxfp8_transformation_after_loading(model, preserve_runtime_refs=True):
                     return  # graph-safe reload – no invalidation needed
@@ -617,6 +645,7 @@ class WorkerBase:
             process_weights_after_loading(self.model_runner.model, self.model_config, torch.device(load_device))
 
         if self._is_mxfp8_model:
+            self._mxfp8_transformation_applied = True
             _record_mxfp8_runtime_refs(self.model_runner.model)
         invalidate_aclgraph_cache_after_weight_update(self.model_runner)
 

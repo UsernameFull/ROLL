@@ -288,9 +288,12 @@ def _fp8_linear_create_weights(
         layer.register_parameter("input_scale", None)
 
 
-_original_fp8_linear_create_weights = Fp8LinearMethod.create_weights
-_original_fp8_linear_process_weights_after_loading = Fp8LinearMethod.process_weights_after_loading
-Fp8LinearMethod.create_weights = _fp8_linear_create_weights
+# Placeholders so function bodies that reference these as globals can be defined
+# before _apply_fp8_monkey_patches() captures the real originals at the bottom.
+_original_fp8_linear_create_weights: object = None
+_original_fp8_linear_process_weights_after_loading: object = None
+_original_fp8_moe_create_weights: object = None
+_original_fp8_moe_process_weights_after_loading: object = None
 
 
 def _fp8_linear_process_weights_after_loading(self, layer: Module) -> None:
@@ -380,9 +383,6 @@ def _select_fp8_linear_process_weights_after_loading():
             _original_fp8_linear_process_weights_after_loading
         )
     return _fp8_linear_process_weights_after_loading
-
-
-Fp8LinearMethod.process_weights_after_loading = _select_fp8_linear_process_weights_after_loading()
 
 
 # ---------------------------------------------------------------------------
@@ -508,11 +508,6 @@ def _fp8_moe_create_weights(
     # do not need patch weight loader of scale
     assert type(layer.w13_weight_scale_inv) == Parameter
     assert type(layer.w2_weight_scale_inv) == Parameter
-
-
-_original_fp8_moe_create_weights = Fp8MoEMethod.create_weights
-_original_fp8_moe_process_weights_after_loading = Fp8MoEMethod.process_weights_after_loading
-Fp8MoEMethod.create_weights = _fp8_moe_create_weights
 
 
 def _fp8_moe_process_weights_after_loading_vllm10(self, layer: Module) -> None:
@@ -706,4 +701,34 @@ def _select_fp8_moe_process_weights_after_loading():
     return _fp8_moe_process_weights_after_loading_vllm10
 
 
-Fp8MoEMethod.process_weights_after_loading = _select_fp8_moe_process_weights_after_loading()
+_FP8_MONKEY_PATCHES_APPLIED = False
+
+
+def _apply_fp8_monkey_patches() -> None:
+    """Install ROLL's FP8 create_weights / process_weights_after_loading patches.
+
+    Idempotent: captures the upstream originals and swaps in ROLL's versions
+    exactly once, so repeated engine creation cannot double-patch (which would
+    otherwise re-capture ROLL's own methods as the "originals").
+    """
+    global _FP8_MONKEY_PATCHES_APPLIED
+    global _original_fp8_linear_create_weights, _original_fp8_linear_process_weights_after_loading
+    global _original_fp8_moe_create_weights, _original_fp8_moe_process_weights_after_loading
+
+    if _FP8_MONKEY_PATCHES_APPLIED:
+        return
+
+    _original_fp8_linear_create_weights = Fp8LinearMethod.create_weights
+    _original_fp8_linear_process_weights_after_loading = Fp8LinearMethod.process_weights_after_loading
+    _original_fp8_moe_create_weights = Fp8MoEMethod.create_weights
+    _original_fp8_moe_process_weights_after_loading = Fp8MoEMethod.process_weights_after_loading
+
+    Fp8LinearMethod.create_weights = _fp8_linear_create_weights
+    Fp8LinearMethod.process_weights_after_loading = _select_fp8_linear_process_weights_after_loading()
+    Fp8MoEMethod.create_weights = _fp8_moe_create_weights
+    Fp8MoEMethod.process_weights_after_loading = _select_fp8_moe_process_weights_after_loading()
+
+    _FP8_MONKEY_PATCHES_APPLIED = True
+
+
+_apply_fp8_monkey_patches()

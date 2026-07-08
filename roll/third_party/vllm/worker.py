@@ -27,6 +27,10 @@ from roll.utils.send_recv_utils import monkey_patch_torch_reductions, named_tens
 logger = get_logger()
 
 
+def _is_legacy_non_npu_vllm_before(version: str) -> bool:
+    return not current_platform.is_npu() and Version(vllm.__version__) < Version(version)
+
+
 # ---------------------------------------------------------------------------
 # MXFP8 weight lifecycle helpers (Ascend NPU)
 # ---------------------------------------------------------------------------
@@ -540,7 +544,7 @@ class WorkerBase:
         self.reload_model()
         model = self.model_runner.model
 
-        if vllm.__version__ < "0.8.5":
+        if _is_legacy_non_npu_vllm_before("0.8.5"):
             from roll.third_party.vllm.vllm_utils import patch_vllm_moe_model_weight_loader
             patch_vllm_moe_model_weight_loader(model)
 
@@ -559,7 +563,7 @@ class WorkerBase:
         if not self.kv_cache_loaded:
             self.wake_up(["kv_cache"])
             self.kv_cache_loaded = True
-        if vllm.__version__ < "0.8.5" and self.buffers is not None:
+        if _is_legacy_non_npu_vllm_before("0.8.5") and self.buffers is not None:
             # https://github.com/vllm-project/vllm/issues/16564
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
@@ -571,7 +575,7 @@ class WorkerBase:
         assert (self.weight_loaded and self.kv_cache_loaded) or (not self.weight_loaded and not self.kv_cache_loaded)
         if not self.weight_loaded:
             return
-        if vllm.__version__ < "0.8.5" and level == 2:
+        if _is_legacy_non_npu_vllm_before("0.8.5") and level == 2:
             # https://github.com/vllm-project/vllm/issues/16564
             model = self.model_runner.model
             self.buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
@@ -627,13 +631,19 @@ class WorkerBase:
         self._load_weights_internal(self.model_runner.model, named_params)
 
     def process_weights_after_loading(self):
-        vllm_ver = Version(vllm.__version__)
-        is_supported = (
-            vllm_ver >= Version("0.11.1")
-            or vllm_ver in (Version("0.11.0"), Version("0.11.1rc1"), Version("0.11.1rc2.dev0+gc3a722fcb.d20251021"))
-        )
-        if not is_supported:
-            return
+        if not current_platform.is_npu():
+            vllm_ver = Version(vllm.__version__)
+            is_supported = (
+                vllm_ver >= Version("0.11.1")
+                or vllm_ver
+                in (
+                    Version("0.11.0"),
+                    Version("0.11.1rc1"),
+                    Version("0.11.1rc2.dev0+gc3a722fcb.d20251021"),
+                )
+            )
+            if not is_supported:
+                return
 
         from vllm.model_executor.model_loader.utils import process_weights_after_loading
         from vllm.utils.torch_utils import set_default_torch_dtype

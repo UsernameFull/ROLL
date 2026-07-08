@@ -20,6 +20,16 @@ from roll.utils.vllm_online_quantization import apply_online_quantization_config
 logger = get_logger()
 
 _PLATFORM_PATCHES_APPLIED = False
+_MIN_NPU_VLLM_VERSION = Version("0.18.0")
+
+
+def _raise_if_unsupported_npu_vllm(vllm_version: Version) -> None:
+    if current_platform.is_npu() and vllm_version < _MIN_NPU_VLLM_VERSION:
+        raise RuntimeError(
+            f"ROLL NPU vLLM integration requires vLLM>={_MIN_NPU_VLLM_VERSION}; "
+            f"detected vLLM {vllm.__version__}. Legacy vLLM-Ascend compatibility code "
+            "for older releases has been removed."
+        )
 
 
 def apply_platform_patches_once():
@@ -33,12 +43,21 @@ def apply_platform_patches_once():
         npu_patch.check_vllm_ascend_before_server_launch()
         npu_patch.apply_npu_vllm_patches()
     except Exception as e:
-        logger.warning("Failed to apply vLLM-Ascend NPU patches: %s", e)
+        logger.error("Failed to initialize vLLM-Ascend NPU runtime checks: %s", e)
+        raise
     _PLATFORM_PATCHES_APPLIED = True
 
 
 def _resolve_ray_executor_classes():
     vllm_version = Version(vllm.__version__)
+    if current_platform.is_npu():
+        _raise_if_unsupported_npu_vllm(vllm_version)
+        if Version("0.16").release <= vllm_version.release:
+            import roll.third_party.vllm.patch_transformers  # noqa: F401
+        return None, safe_import_class(
+            "roll.third_party.vllm.ray_distributed_executor.CustomRayDistributedExecutor"
+        )
+
     if vllm_version == Version("0.8.4"):
         import roll.third_party.vllm.vllm_0_8_4  # noqa: F401
 

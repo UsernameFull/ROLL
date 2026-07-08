@@ -106,6 +106,8 @@ ROLL will not silently dequantize to BF16.
 
 推理侧分两条路径。
 
+NPU vLLM 侧版本基线固定为 vLLM/vLLM-Ascend >= 0.18。ROLL 不再维护 vLLM-Ascend 0.11/0.13 的 NPU monkey patch，启动时只做版本门禁和必要的硬件安全检查。
+
 ### Online MXFP8
 
 用于训练权重仍是 BF16/FP16，但 vLLM rollout 希望用 Ascend MXFP8 的场景：

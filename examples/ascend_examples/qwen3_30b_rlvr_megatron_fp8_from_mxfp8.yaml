@@ -22,7 +22,7 @@ system_envs:
   # Set ROLL_ASCEND_MXFP8_STATE_DICT_LOADER externally if your MindSpeed build
   # does not expose a supported trainable MXFP8 state-dict loader.
   ROLL_MAX_CONCURRENT_TASKS: '32'
-  ASCEND_RT_VISIBLE_DEVICES: '0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15'
+  ASCEND_RT_VISIBLE_DEVICES: '0,1,2,3,4,5,6,7'
   TOKENIZERS_PARALLELISM: 'true'
 track_with: tensorboard
 tracker_kwargs:
@@ -35,7 +35,7 @@ tracker_kwargs:
     - mxfp8
     - megatron
 
-num_gpus_per_node: 16
+num_gpus_per_node: 8
 pretrain: /path/to/Qwen3-30B-A3B-ModelSlim-MXFP8
 reward_pretrain: Qwen/Qwen3-30B-A3B
 
@@ -92,7 +92,7 @@ actor_train:
       quantized_checkpoint_format: ascend_mxfp8
       use_flash_attn: true
       moe_router_dtype: fp32
-  device_mapping: list(range(0,16))
+  device_mapping: list(range(0,8))
   infer_batch_size: 1
   use_sequence_packing: false
   use_remove_padding: false
@@ -123,7 +123,7 @@ actor_infer:
       enforce_eager: false
       quantization: ascend
       load_format: auto
-  device_mapping: list(range(0,16))
+  device_mapping: list(range(0,8))
   infer_batch_size: 128
 
 reference:
@@ -141,7 +141,7 @@ reference:
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 1
       expert_tensor_parallel_size: 1
-  device_mapping: list(range(0,16))
+  device_mapping: list(range(0,8))
   infer_batch_size: 2
 
 rewards:

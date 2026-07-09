@@ -6,9 +6,12 @@ from typing import Any
 
 
 ASCEND_MXFP8_ONLINE_QUANTIZATION = "ascend_mxfp8"
+VLLM_FP8_ONLINE_QUANTIZATION = "vllm_fp8"
 ASCEND_MXFP8_QUANT_TYPE = "W8A8_MXFP8"
 FLOAT_QUANT_TYPE = "FLOAT"
 DEFAULT_MXFP8_GROUP_SIZE = 32
+DEFAULT_FP8_WEIGHT_BLOCK_SIZE = [128, 128]
+VLLM_FP8_SCHEMES = {"fp8", "fp8_per_tensor", "per_tensor", "fp8_per_block", "per_block", "blockwise"}
 
 
 _ATTENTION_PROJECTIONS = ("q_proj", "k_proj", "v_proj", "o_proj", "qkv_proj")
@@ -151,6 +154,47 @@ def build_ascend_mxfp8_quant_description(
     return description
 
 
+def build_vllm_fp8_quant_config(options: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build a vLLM native FP8 quantization config for online rollout quantization.
+
+    ROLL uses ``load_format=dummy`` for online rollout. The training side still
+    sends BF16/FP16 tensors; ROLL's vLLM FP8 weight loaders quantize those
+    tensors into the FP8 runtime layout during each weight sync.
+    """
+    options = dict(options or {})
+    user_quant_config = deepcopy(options.get("quantization_config", {}))
+    if not isinstance(user_quant_config, Mapping):
+        raise TypeError("online_quantization_config.quantization_config must be a mapping for vllm_fp8.")
+    user_quant_config = dict(user_quant_config)
+
+    scheme = str(options.get("scheme", options.get("quantization", "fp8_per_block"))).lower()
+    if scheme not in VLLM_FP8_SCHEMES:
+        raise ValueError(
+            f"Unsupported vllm_fp8 online quantization scheme {scheme!r}. "
+            f"Supported schemes: {sorted(VLLM_FP8_SCHEMES)}."
+        )
+
+    quant_config: dict[str, Any] = {
+        "activation_scheme": str(options.get("activation_scheme", "dynamic")),
+        "fmt": str(options.get("fmt", "e4m3")),
+        "quant_method": "fp8",
+    }
+
+    weight_block_size = options.get("weight_block_size")
+    if weight_block_size is None and scheme in {"fp8_per_block", "per_block", "blockwise"}:
+        weight_block_size = DEFAULT_FP8_WEIGHT_BLOCK_SIZE
+    if weight_block_size is not None:
+        if not isinstance(weight_block_size, (list, tuple)) or len(weight_block_size) != 2:
+            raise ValueError("online_quantization_config.weight_block_size must be a length-2 list for vllm_fp8.")
+        quant_config["weight_block_size"] = [int(weight_block_size[0]), int(weight_block_size[1])]
+
+    if user_quant_config.get("quant_method", "fp8") != "fp8":
+        raise ValueError("online_quantization_config.quantization_config.quant_method must be 'fp8' for vllm_fp8.")
+    quant_config.update(user_quant_config)
+    quant_config["quant_method"] = "fp8"
+    return quant_config
+
+
 def _load_hf_config(model_name_or_path: str, kwargs: dict[str, Any]) -> Any:
     from transformers import AutoConfig
 
@@ -172,19 +216,26 @@ def apply_online_quantization_config(kwargs: dict[str, Any], hf_config: Any | No
           online_quantization: ascend_mxfp8
           online_quantization_config:
             group_size: 32
+
+        strategy_config:
+          online_quantization: vllm_fp8
+          online_quantization_config:
+            scheme: fp8_per_block
     """
     online_quantization = kwargs.pop("online_quantization", None)
     online_quantization_config = kwargs.pop("online_quantization_config", None) or {}
     if online_quantization in (None, False, ""):
         return None
-    if online_quantization != ASCEND_MXFP8_ONLINE_QUANTIZATION:
-        raise ValueError(
-            f"Unsupported online_quantization={online_quantization!r}. "
-            f"Only {ASCEND_MXFP8_ONLINE_QUANTIZATION!r} is currently supported."
-        )
     if not isinstance(online_quantization_config, Mapping):
         raise TypeError("online_quantization_config must be a mapping when online_quantization is enabled.")
     online_quantization_config = dict(online_quantization_config)
+    if online_quantization == VLLM_FP8_ONLINE_QUANTIZATION:
+        return _apply_vllm_fp8_online_quantization(kwargs, online_quantization_config)
+    if online_quantization != ASCEND_MXFP8_ONLINE_QUANTIZATION:
+        raise ValueError(
+            f"Unsupported online_quantization={online_quantization!r}. "
+            f"Supported values: {ASCEND_MXFP8_ONLINE_QUANTIZATION!r}, {VLLM_FP8_ONLINE_QUANTIZATION!r}."
+        )
 
     quantization = kwargs.get("quantization")
     if quantization not in (None, "ascend"):
@@ -216,6 +267,40 @@ def apply_online_quantization_config(kwargs: dict[str, Any], hf_config: Any | No
 
     generated_quant_config.update(deepcopy(user_quant_config))
     generated_quant_config["quant_method"] = "ascend"
+    hf_overrides["quantization_config"] = generated_quant_config
+    kwargs["hf_overrides"] = hf_overrides
+    return generated_quant_config
+
+
+def _apply_vllm_fp8_online_quantization(
+    kwargs: dict[str, Any],
+    online_quantization_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply GPU vLLM FP8 online rollout quantization settings."""
+    quantization = kwargs.get("quantization")
+    if quantization not in (None, "fp8"):
+        raise ValueError(
+            "online_quantization=vllm_fp8 requires strategy_config.quantization to be omitted or set to 'fp8'."
+        )
+    kwargs["quantization"] = "fp8"
+    kwargs["load_format"] = "dummy"
+
+    generated_quant_config = build_vllm_fp8_quant_config(dict(online_quantization_config))
+
+    hf_overrides = kwargs.get("hf_overrides") or {}
+    if not isinstance(hf_overrides, Mapping):
+        raise TypeError("online_quantization=vllm_fp8 requires hf_overrides to be a mapping when provided.")
+    hf_overrides = deepcopy(hf_overrides)
+
+    user_quant_config = hf_overrides.get("quantization_config") or {}
+    if not isinstance(user_quant_config, Mapping):
+        raise TypeError("hf_overrides.quantization_config must be a mapping for online_quantization=vllm_fp8.")
+    user_quant_config = dict(user_quant_config)
+    if user_quant_config.get("quant_method", "fp8") != "fp8":
+        raise ValueError("hf_overrides.quantization_config.quant_method must be 'fp8' for vllm_fp8.")
+
+    generated_quant_config.update(deepcopy(user_quant_config))
+    generated_quant_config["quant_method"] = "fp8"
     hf_overrides["quantization_config"] = generated_quant_config
     kwargs["hf_overrides"] = hf_overrides
     return generated_quant_config

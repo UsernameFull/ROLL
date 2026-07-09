@@ -8,6 +8,35 @@ FP8 quantization is an efficient numerical precision optimization technique that
 
 ## actor_infer FP8 Configuration
 
+### Online Quantization Shortcut
+
+For RL rollout, the training worker usually sends BF16/FP16 weights to vLLM
+after every policy update. You can let ROLL quantize those synced weights into
+vLLM FP8 runtime weights by using `online_quantization: vllm_fp8`:
+
+```yaml
+actor_infer:
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      online_quantization: vllm_fp8
+      online_quantization_config:
+        scheme: fp8_per_block
+        weight_block_size: [128, 128]
+```
+
+This is equivalent to setting `quantization: fp8`, `load_format: dummy`, and a
+vLLM FP8 `hf_overrides.quantization_config`. ROLL keeps the user-facing config
+short and uses the existing vLLM FP8 weight loaders to quantize incoming
+BF16/FP16 tensors during weight synchronization.
+
+Supported `scheme` values:
+
+- `fp8_per_block` / `per_block` / `blockwise`: blockwise FP8, default
+- `fp8_per_tensor` / `per_tensor` / `fp8`: per-tensor FP8
+
+For MoE models, prefer `fp8_per_block`.
+
 ### Basic Configuration
 
 ```yaml

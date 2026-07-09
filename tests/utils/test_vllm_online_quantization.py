@@ -4,9 +4,11 @@ import pytest
 
 from roll.utils.vllm_online_quantization import (
     ASCEND_MXFP8_QUANT_TYPE,
+    DEFAULT_FP8_WEIGHT_BLOCK_SIZE,
     FLOAT_QUANT_TYPE,
     apply_online_quantization_config,
     build_ascend_mxfp8_quant_description,
+    build_vllm_fp8_quant_config,
     default_load_format_for_quantization,
 )
 
@@ -77,6 +79,82 @@ def test_apply_online_quantization_config_rejects_conflicting_quantization():
         apply_online_quantization_config(kwargs, hf_config=SimpleNamespace(model_type="qwen3", num_hidden_layers=1))
 
 
+def test_build_vllm_fp8_quant_config_defaults_to_blockwise():
+    quant_config = build_vllm_fp8_quant_config()
+
+    assert quant_config["quant_method"] == "fp8"
+    assert quant_config["activation_scheme"] == "dynamic"
+    assert quant_config["fmt"] == "e4m3"
+    assert quant_config["weight_block_size"] == DEFAULT_FP8_WEIGHT_BLOCK_SIZE
+
+
+def test_build_vllm_fp8_quant_config_supports_per_tensor():
+    quant_config = build_vllm_fp8_quant_config({"scheme": "fp8_per_tensor"})
+
+    assert quant_config["quant_method"] == "fp8"
+    assert "weight_block_size" not in quant_config
+
+
+def test_apply_vllm_fp8_online_quantization_injects_hf_overrides():
+    kwargs = {
+        "model": "Qwen/Qwen3-8B",
+        "online_quantization": "vllm_fp8",
+        "online_quantization_config": {"weight_block_size": [64, 128]},
+        "hf_overrides": {"rope_scaling": {"type": "default"}},
+    }
+
+    quant_config = apply_online_quantization_config(kwargs, hf_config=SimpleNamespace(model_type="qwen3"))
+
+    assert kwargs["quantization"] == "fp8"
+    assert kwargs["load_format"] == "dummy"
+    assert "online_quantization" not in kwargs
+    assert "online_quantization_config" not in kwargs
+    assert kwargs["hf_overrides"]["rope_scaling"] == {"type": "default"}
+    assert kwargs["hf_overrides"]["quantization_config"] is quant_config
+    assert quant_config["quant_method"] == "fp8"
+    assert quant_config["weight_block_size"] == [64, 128]
+
+
+def test_apply_vllm_fp8_online_quantization_merges_user_quant_config():
+    kwargs = {
+        "model": "Qwen/Qwen3-8B",
+        "online_quantization": "vllm_fp8",
+        "online_quantization_config": {
+            "scheme": "fp8_per_tensor",
+            "quantization_config": {"activation_scheme": "dynamic", "fmt": "e4m3"},
+        },
+    }
+
+    quant_config = apply_online_quantization_config(kwargs, hf_config=SimpleNamespace(model_type="qwen3"))
+
+    assert kwargs["quantization"] == "fp8"
+    assert kwargs["load_format"] == "dummy"
+    assert quant_config["quant_method"] == "fp8"
+    assert "weight_block_size" not in quant_config
+
+
+def test_apply_vllm_fp8_online_quantization_rejects_conflicting_quantization():
+    kwargs = {
+        "model": "Qwen/Qwen3-8B",
+        "online_quantization": "vllm_fp8",
+        "quantization": "ascend",
+    }
+
+    with pytest.raises(ValueError, match="online_quantization=vllm_fp8"):
+        apply_online_quantization_config(kwargs, hf_config=SimpleNamespace(model_type="qwen3"))
+
+
+def test_apply_vllm_fp8_online_quantization_rejects_conflicting_quant_method():
+    kwargs = {
+        "model": "Qwen/Qwen3-8B",
+        "online_quantization": "vllm_fp8",
+        "hf_overrides": {"quantization_config": {"quant_method": "awq"}},
+    }
+
+    with pytest.raises(ValueError, match="quant_method must be 'fp8'"):
+        apply_online_quantization_config(kwargs, hf_config=SimpleNamespace(model_type="qwen3"))
+
+
 def test_prequantized_ascend_defaults_to_auto_load_format():
     assert default_load_format_for_quantization({"quantization": "ascend"}) == "auto"
 
@@ -88,3 +166,7 @@ def test_online_ascend_mxfp8_defaults_to_dummy_load_format():
         )
         == "dummy"
     )
+
+
+def test_online_vllm_fp8_defaults_to_dummy_load_format():
+    assert default_load_format_for_quantization({"online_quantization": "vllm_fp8"}) == "dummy"

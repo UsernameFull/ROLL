@@ -121,7 +121,7 @@ async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
     online_quant_config = apply_online_quantization_config(kwargs)
     if online_quant_config is not None:
         logger.info(
-            "Enabled ROLL online quantization: ascend_mxfp8, %d quant description entries",
+            "Enabled ROLL online quantization, %d quant config entries",
             len(online_quant_config),
         )
 

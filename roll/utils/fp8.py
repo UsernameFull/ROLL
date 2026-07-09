@@ -20,11 +20,6 @@ except ImportError:
     pass
 
 
-def is_npu_available() -> bool:
-    """Check if Ascend NPU is available for quantization."""
-    return _NPU_AVAILABLE
-
-
 # ---------------------------------------------------------------------------
 # Ascend MXFP8 detection
 # ---------------------------------------------------------------------------

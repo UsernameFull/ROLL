@@ -1,7 +1,6 @@
 import gc
 import hashlib
 import json
-import time
 from collections import OrderedDict
 from contextlib import nullcontext
 from typing import Iterable, Optional, Tuple
@@ -14,8 +13,6 @@ from roll.platforms import current_platform
 from roll.third_party.vllm.vllm_utils import TensorLoRARequest, patch_vllm_lora_manager
 from roll.third_party.vllm.parameter_utils import (
     TemporaryParameterSubclassTypes,
-    copy_parameter_metadata,
-    parameter_from_runtime_ref,
     runtime_value_from_ref,
 )
 from roll.utils.collective import collective
@@ -240,10 +237,6 @@ def _tensor_signature(tensor: torch.Tensor) -> tuple:
     )
 
 
-def _iter_mxfp8_runtime_modules(model: torch.nn.Module):
-    yield from Mxfp8WeightLifecycle(model).iter_runtime_modules()
-
-
 def _record_mxfp8_runtime_refs(model: torch.nn.Module) -> int:
     """Remember transformed runtime tensors so graph replay can keep addresses."""
     return Mxfp8WeightLifecycle(model).record_runtime_refs()
@@ -252,10 +245,6 @@ def _record_mxfp8_runtime_refs(model: torch.nn.Module) -> int:
 def _restore_mxfp8_runtime_refs(model: torch.nn.Module) -> int:
     """Copy newly transformed tensors back into the refs captured by ACL graph."""
     return Mxfp8WeightLifecycle(model).restore_runtime_refs()
-
-
-def _has_mxfp8_runtime_refs(model: torch.nn.Module) -> bool:
-    return Mxfp8WeightLifecycle(model).has_runtime_refs()
 
 
 def _apply_mxfp8_transformation_after_loading(

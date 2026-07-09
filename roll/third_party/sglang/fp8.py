@@ -24,7 +24,6 @@ from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE
 from roll.utils.fp8 import (
     per_block_fp8_quant,
     is_mxfp8_ascend,
-    is_npu_available,
     load_mxfp8_weight,
 )
 from roll.utils.logging import get_logger

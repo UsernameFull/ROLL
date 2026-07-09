@@ -15,13 +15,13 @@ class _Model(torch.nn.Module):
         self.layer.weight_scale = torch.nn.Parameter(torch.ones(2))
 
 
-def _iter_test_modules(model):
-    yield "layer", model.layer
+def _iter_test_modules(self):
+    yield "layer", self.model.layer
 
 
 def test_mxfp8_runtime_refs_keep_storage_and_copy_new_values(monkeypatch):
     model = _Model()
-    monkeypatch.setattr(worker, "_iter_mxfp8_runtime_modules", _iter_test_modules)
+    monkeypatch.setattr(worker.Mxfp8WeightLifecycle, "iter_runtime_modules", _iter_test_modules)
 
     original_weight = model.layer.weight.data
     original_scale = model.layer.weight_scale.data
@@ -44,7 +44,7 @@ def test_mxfp8_runtime_refs_keep_storage_and_copy_new_values(monkeypatch):
 
 def test_mxfp8_runtime_refs_reject_metadata_changes(monkeypatch):
     model = _Model()
-    monkeypatch.setattr(worker, "_iter_mxfp8_runtime_modules", _iter_test_modules)
+    monkeypatch.setattr(worker.Mxfp8WeightLifecycle, "iter_runtime_modules", _iter_test_modules)
 
     worker._record_mxfp8_runtime_refs(model)
     model.layer.weight = torch.nn.Parameter(torch.ones(3, 2))
@@ -55,7 +55,7 @@ def test_mxfp8_runtime_refs_reject_metadata_changes(monkeypatch):
 
 def test_mxfp8_transform_wrapper_reports_graph_safe_update(monkeypatch):
     model = _Model()
-    monkeypatch.setattr(worker, "_iter_mxfp8_runtime_modules", _iter_test_modules)
+    monkeypatch.setattr(worker.Mxfp8WeightLifecycle, "iter_runtime_modules", _iter_test_modules)
 
     worker._record_mxfp8_runtime_refs(model)
     original_weight = model.layer.weight.data

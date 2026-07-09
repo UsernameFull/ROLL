@@ -23,7 +23,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import requantize_
 
 from roll.utils.fp8 import (
     per_block_fp8_quant,
-    per_block_fp8_quant_ascend,
     is_mxfp8_ascend,
     load_mxfp8_weight,
 )
@@ -94,17 +93,6 @@ def update_mxfp8_quant_config(vllm_config):
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
-
-
-def _resolve_quant_fn(layer: Module, quant_config):
-    """Return the appropriate quantisation function for *layer*.
-
-    Returns a callable ``(weight, block_size_or_dtype) -> (qweight, scale)``
-    and the second argument to pass to it.
-    """
-    if is_mxfp8_ascend(quant_config):
-        return per_block_fp8_quant_ascend, getattr(layer, "params_dtype", torch.bfloat16)
-    return per_block_fp8_quant, layer.weight_block_size
 
 
 def _linear_scale_param(layer: Module):

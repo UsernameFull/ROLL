@@ -3,7 +3,7 @@ hydra:
     dir: .
   output_subdir: null
 
-exp_name: "qwen3-30BA3B-rlvr-megatron-fp8-vllm-mxfp8"
+exp_name: "qwen3-30BA3B-rlvr-megatron-fp8-from-mxfp8"
 seed: 42
 logging_dir: ./output/logs
 output_dir: ./output
@@ -55,11 +55,12 @@ length_loss_weight: false
 add_token_level_kl: false
 whiten_advantages: true
 
-pretrain: Qwen/Qwen3-30B-A3B
+pretrain: /path/to/Qwen3-30B-A3B-ModelSlim-MXFP8
 reward_pretrain: Qwen/Qwen3-30B-A3B
 
 actor_train:
   model_args:
+    model_name_or_path: ${pretrain}
     disable_gradient_checkpointing: false
     dtype: bf16
     model_type: ~
@@ -91,8 +92,12 @@ actor_train:
       recompute_granularity: full
       recompute_method: uniform
       recompute_num_layers: 1
+      transformer_impl: transformer_engine
       fp8: e4m3
+      fp8_format: e4m3
       fp8_recipe: mxfp8
+      fp8_param: true
+      quantized_checkpoint_format: ascend_mxfp8
       use_flash_attn: true
       moe_router_dtype: fp32
   use_sequence_packing: false
@@ -102,6 +107,7 @@ actor_train:
 
 actor_infer:
   model_args:
+    model_name_or_path: ${pretrain}
     disable_gradient_checkpointing: true
     dtype: bf16
   generating_args:
@@ -121,12 +127,14 @@ actor_infer:
       max_model_len: 6144
       tensor_parallel_size: 2
       enforce_eager: true
-      load_format: dummy
+      quantization: ascend
+      load_format: auto
   device_mapping: list(range(0,8))
   infer_batch_size: 1
 
 reference:
   model_args:
+    model_name_or_path: Qwen/Qwen3-30B-A3B
     disable_gradient_checkpointing: true
     dtype: bf16
     model_type: ~

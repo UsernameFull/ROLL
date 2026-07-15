@@ -17,7 +17,6 @@ from transformers.configuration_utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from ..constants import HUGGINGFACE_AUTOMAP_CACHE, MCA_CONFIG_NAME
 from ..initialize import initialize_megatron
-from ..platforms import current_platform
 from ..training_args import DistributingParallelArguments, TrainingArguments
 from ..utils import get_logger
 from .converter.template import get_template
@@ -313,7 +312,6 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
     )
 
     def __post_init__(self):
-
         if self.virtual_pipeline_model_parallel_size is None and self.overlap_p2p_comm:
             self.overlap_p2p_comm = False
             logger.warning("Non-interleaved pipeline parallelism does not support overlapping p2p communication!")

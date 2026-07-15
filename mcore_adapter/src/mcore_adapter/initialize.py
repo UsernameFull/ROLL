@@ -98,7 +98,7 @@ def _set_random_seed(seed_):
 
 
 def initialize_megatron(args: "TrainingArguments"):
-    bootstrap_npu_runtime()
+    # bootstrap_npu_runtime()
     if not is_distribute_initialized():
         _initialize_distributed(args)
     _set_random_seed(args.seed)

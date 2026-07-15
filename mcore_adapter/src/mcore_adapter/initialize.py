@@ -29,7 +29,7 @@ def bootstrap_npu_runtime():
     import torch_npu  # noqa: F401
 
     try:
-        import mindspeed.megatron_adaptor  # noqa: F401
+        import megatron_adaptor  # noqa: F401
     except ImportError:
         pass
 
@@ -61,12 +61,12 @@ def bootstrap_npu_runtime():
     _NPU_RUNTIME_BOOTSTRAPPED = True
 
 
-def apply_mindspeed_feature_defaults(config):
-    if "mindspeed.megatron_adaptor" not in sys.modules:
+def apply_megatron_adaptor_feature_defaults(config):
+    if "megatron_adaptor" not in sys.modules:
         return
 
     try:
-        from mindspeed.args_utils import get_mindspeed_args
+        from megatron_adaptor.utils.args_utils import get_mindspeed_args
     except ImportError:
         return
 

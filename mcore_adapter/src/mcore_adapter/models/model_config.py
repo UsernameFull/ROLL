@@ -16,7 +16,7 @@ from transformers import AutoConfig
 from transformers.configuration_utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from ..constants import HUGGINGFACE_AUTOMAP_CACHE, MCA_CONFIG_NAME
-from ..initialize import apply_mindspeed_feature_defaults, initialize_megatron
+from ..initialize import apply_megatron_adaptor_feature_defaults, initialize_megatron
 from ..platforms import current_platform
 from ..training_args import DistributingParallelArguments, TrainingArguments
 from ..utils import get_logger
@@ -378,7 +378,7 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
                 pipeline_model_parallel_size=self.pipeline_model_parallel_size,
             )
 
-        apply_mindspeed_feature_defaults(self)
+        apply_megatron_adaptor_feature_defaults(self)
         super().__post_init__()
         pipeline_size = self.pipeline_model_parallel_size
         if self.virtual_pipeline_model_parallel_size is not None:

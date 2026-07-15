@@ -44,14 +44,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _replace_with_rmsnorm(submodules, attr_name):
-    if not hasattr(submodules, attr_name):
-        return
-    norm = getattr(submodules, attr_name)
-    norm_name = norm.__name__ if isinstance(norm, type) else norm.__class__.__name__
-    if not norm_name.endswith("RMSNorm"):
-        setattr(submodules, attr_name, RMSNorm)
-
 class VirtualModels:
     # a wrapper for model list to support virtual pipeline model parallel
     def __init__(self, cls, config: "McaModelConfig", *args, **kwargs):
@@ -389,15 +381,6 @@ class McaGPTModel(GPTModel, PretrainedModel):
                 config.num_moe_experts, config.moe_grouped_gemm, qk_layernorm=config.qk_layernorm
             )
         else:
-            if current_platform.is_npu():
-                module_spec = get_gpt_layer_local_spec(
-                    config.num_moe_experts,
-                    config.moe_grouped_gemm,
-                    qk_layernorm=config.qk_layernorm,
-                    normalization=config.normalization,
-                )
-                return module_spec
-
             module_spec = get_gpt_layer_local_spec(
                 config.num_moe_experts, config.moe_grouped_gemm, qk_layernorm=config.qk_layernorm
             )

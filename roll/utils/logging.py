@@ -1,13 +1,7 @@
 import logging
 import os
 import sys
-from typing import Iterable, Optional
-
-
-def format_model_summary(models: Iterable[object]) -> str:
-    """Return a model summary without invoking model ``__repr__`` methods."""
-    model_types = [type(model).__name__ for model in models]
-    return f"{len(model_types)} model chunk(s): {', '.join(model_types)}"
+from typing import Optional
 
 
 def is_roll_debug_mode():

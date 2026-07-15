@@ -5,34 +5,28 @@ on:
     inputs:
       megatron_adaptor_repo:
         description: "MegatronAdaptor git repository"
-        required: false
         default: "https://gitcode.com/Ascend/MegatronAdaptor.git"
       megatron_adaptor_ref:
         description: "MegatronAdaptor branch, tag, or ref to install"
-        required: false
         default: "core_r0.17.0"
       transformer_engine_npu_repo:
         description: "TransformerEngineNPU git repository"
-        required: false
         default: "https://gitcode.com/Ascend/TransformerEngineNPU.git"
       transformer_engine_npu_ref:
         description: "TransformerEngineNPU branch, tag, or ref to install"
-        required: false
         default: "main"
       megatron_core_repo:
         description: "Megatron-Core git repository"
-        required: false
         default: "https://github.com/NVIDIA/Megatron-LM.git"
       megatron_core_ref:
         description: "Megatron-Core branch, tag, or ref to install"
-        required: false
         default: "core_r0.17.0"
   push:
     branches: [main, npu_ci_all]
-    paths:
+    paths: &npu_paths
       - ".github/workflows/ci-npu-mindspeed.yml"
       - "mcore_adapter/**"
-      - "roll/third_party/megatron/**"
+      - "roll/**"
       - "tests/third_party/megatron/**"
       - "requirements_common.txt"
       - "requirements_vision.txt"
@@ -40,15 +34,7 @@ on:
       - "pyproject.toml"
   pull_request:
     branches: [main, npu_ci_all]
-    paths:
-      - ".github/workflows/ci-npu-mindspeed.yml"
-      - "mcore_adapter/**"
-      - "roll/third_party/megatron/**"
-      - "tests/third_party/megatron/**"
-      - "requirements_common.txt"
-      - "requirements_vision.txt"
-      - "setup.py"
-      - "pyproject.toml"
+    paths: *npu_paths
 
 permissions:
   contents: read
@@ -72,9 +58,6 @@ jobs:
       HF_ENDPOINT: https://hf-mirror.com
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       TASK_QUEUE_ENABLE: "2"
-      VLLM_USE_V1: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM: "0"
-      VLLM_ASCEND_ENABLE_NZ: "0"
       MEGATRON_ADAPTOR_REPO: ${{ github.event.inputs.megatron_adaptor_repo || 'https://gitcode.com/Ascend/MegatronAdaptor.git' }}
       MEGATRON_ADAPTOR_REF: ${{ github.event.inputs.megatron_adaptor_ref || 'core_r0.17.0' }}
       TRANSFORMER_ENGINE_NPU_REPO: ${{ github.event.inputs.transformer_engine_npu_repo || 'https://gitcode.com/Ascend/TransformerEngineNPU.git' }}
@@ -86,8 +69,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Cache NPU pip packages
         uses: actions/cache@v4
@@ -98,10 +79,6 @@ jobs:
             ${{ runner.os }}-npu-megatron-adaptor-${{ env.MEGATRON_ADAPTOR_CACHE_KEY }}-
             ${{ runner.os }}-npu-megatron-adaptor-
             ${{ runner.os }}-npu-pip-
-
-      - name: Configure pip cache
-        run: |
-          mkdir -p "$PIP_CACHE_DIR"
 
       - name: Configure Ascend runtime
         shell: bash
@@ -155,7 +132,6 @@ jobs:
       - name: Install Megatron-Core 0.17
         shell: bash
         run: |
-          set -eo pipefail
           python3 -m pip install --upgrade pip wheel
           # Megatron-Core 0.17 metadata requires Python 3.12, while the
           # Ascend-supported stack and runner image use Python 3.10.
@@ -172,8 +148,6 @@ jobs:
         run: |
           # Megatron-Core requires setuptools<80; this also keeps
           # pkg_resources available for torchair.
-          python3 -m pip install "setuptools<80"
-          python3 -m pip install --retries 10 --timeout 120 pytest-timeout
           python3 -m pip install --retries 10 --timeout 120 -r requirements_common.txt
           python3 -m pip install --retries 10 --timeout 120 deepspeed==0.16.4 tensorboard
           python3 -m pip install "setuptools<80"
@@ -182,7 +156,6 @@ jobs:
       - name: Install Ascend Megatron dependencies
         shell: bash
         run: |
-          set -eo pipefail
           export MEGATRON_ADAPTOR_SRC="/tmp/MegatronAdaptor"
           export TRANSFORMER_ENGINE_NPU_SRC="/tmp/TransformerEngineNPU"
           rm -rf "${MEGATRON_ADAPTOR_SRC}" "${TRANSFORMER_ENGINE_NPU_SRC}"
@@ -200,7 +173,6 @@ jobs:
       - name: Prepare Megatron test model
         shell: bash
         run: |
-          set -eo pipefail
           local_model="/data/cpfs_0/common/models/Qwen2.5-0.5B-Instruct"
           if [ -d "${local_model}" ]; then
             echo "ROLL_MEGATRON_TEST_MODEL=${local_model}" >> "${GITHUB_ENV}"
@@ -219,8 +191,5 @@ jobs:
       - name: Run MegatronAdaptor offload tests
         shell: bash
         run: |
-          export PYTHONPATH="${GITHUB_WORKSPACE}/mcore_adapter/src:${GITHUB_WORKSPACE}:${PYTHONPATH:-}"
           torchrun --standalone --nnodes=1 --nproc-per-node=2 \
             -m pytest -q --tb=short tests/third_party/megatron/test_offload_states.py
-        env:
-          ROLL_NPU_CI: "1"

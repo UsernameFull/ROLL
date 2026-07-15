@@ -77,7 +77,7 @@ from roll.utils.constants import (
 from roll.utils.context_managers import disable_gradients
 from roll.utils.dynamic_batching import make_micro_batch_iter_for_dynamic_batching
 from roll.utils.functionals import adjust_sequence_length, append_to_dict, reduce_metrics
-from roll.utils.logging import format_model_summary, get_logger
+from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType, clear_memory
 from roll.utils.sequence_packing import make_micro_batch_iter_for_sequence_packing, restore_results_order
 
@@ -172,7 +172,7 @@ class MegatronInferStrategy(InferenceStrategy):
             # R2 mode: init router_replay_action=RouterReplayAction.RECORD
             RouterReplay.set_global_router_replay_action(RouterReplayAction.RECORD)
 
-        logger.info("Initialized %s", format_model_summary(self.models_unwrapped))
+        logger.info(f"{self.model.get_models()}")
         dist.barrier()
 
     def _validate_vlm_packing_support(self):
@@ -1257,7 +1257,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         # if self.enable_router_replay and self.router_replay_mode == "R3":
             # RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
 
-        logger.info("Initialized %s", format_model_summary(self.models_unwrapped))
+        logger.info(f"{self.model.get_models()}")
         if self.megatron_train_args.compile_warmup and self.worker.rank_info.pp_size > 1:
             compile_warmup_pipeline_stages(self)
 

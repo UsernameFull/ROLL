@@ -32,13 +32,6 @@ from roll.third_party.megatron.offload_states_patch import (
 )
 from roll.third_party.megatron.optimizer import get_megatron_optimizer
 
-try:
-    # NPU patch
-    import megatron_adaptor
-except ImportError:
-    pass
-
-
 def _default_model_name():
     local_model = "/data/cpfs_0/common/models/Qwen2.5-0.5B-Instruct"
     return os.environ.get(

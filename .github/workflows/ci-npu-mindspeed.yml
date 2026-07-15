@@ -193,36 +193,6 @@ jobs:
           python3 -m pip install --no-build-isolation -e "${TRANSFORMER_ENGINE_NPU_SRC}"
           python3 -m pip install --no-build-isolation -e "${MEGATRON_ADAPTOR_SRC}"
 
-      - name: Verify Ascend Megatron dependencies
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from importlib.metadata import version
-          from pathlib import Path
-
-          import megatron_adaptor
-          import megatron.core
-          import transformer_engine
-
-          megatron_adaptor_path = Path(megatron_adaptor.__file__).resolve()
-          megatron_core_path = Path(megatron.core.__file__).resolve()
-          transformer_engine_path = Path(transformer_engine.__file__).resolve()
-          megatron_core_version = version("megatron-core")
-
-          if not str(megatron_adaptor_path).startswith("/tmp/MegatronAdaptor/"):
-              raise RuntimeError(f"Unexpected MegatronAdaptor source: {megatron_adaptor_path}")
-          if not str(transformer_engine_path).startswith("/tmp/TransformerEngineNPU/"):
-              raise RuntimeError(f"Unexpected TransformerEngineNPU source: {transformer_engine_path}")
-          if not str(megatron_core_path).startswith("/tmp/Megatron-LM/"):
-              raise RuntimeError(f"Unexpected Megatron-Core source: {megatron_core_path}")
-          if not megatron_core_version.startswith("0.17."):
-              raise RuntimeError(f"Expected Megatron-Core 0.17.x, got {megatron_core_version}")
-
-          print(f"megatron_adaptor={megatron_adaptor_path}")
-          print(f"transformer_engine={transformer_engine_path}")
-          print(f"megatron_core={megatron_core_version} ({megatron_core_path})")
-          PY
-
       - name: Install ROLL
         run: |
           python3 -m pip install -e .

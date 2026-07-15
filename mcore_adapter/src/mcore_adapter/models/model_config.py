@@ -298,8 +298,6 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
     )
 
     def __post_init__(self):
-        if current_platform.is_npu() and self.transformer_impl == "transformer_engine":
-            self.transformer_impl = "local"
 
         if self.virtual_pipeline_model_parallel_size is None and self.overlap_p2p_comm:
             self.overlap_p2p_comm = False

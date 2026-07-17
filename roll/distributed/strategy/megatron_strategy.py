@@ -200,7 +200,7 @@ class MegatronInferStrategy(InferenceStrategy):
             # R2 mode: init router_replay_action=RouterReplayAction.RECORD
             RouterReplay.set_global_router_replay_action(RouterReplayAction.RECORD)
 
-        logger.info(f"{self.model.get_models()}")
+        # logger.info(f"{self.model.get_models()}")
         dist.barrier()
 
     def _validate_vlm_packing_support(self):

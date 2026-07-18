@@ -9,11 +9,11 @@ from megatron.core import mpu, tensor_parallel
 from .platforms import current_platform
 from .utils import get_logger
 from .npu_runtime import (
-    apply_mindspeed_feature_defaults,
+    apply_megatron_adaptor_feature_defaults,
     bootstrap_npu_runtime,
     ensure_npu_transformer_engine_symbols,
     get_te_checkpoint_or_none,
-    sync_mindspeed_args,
+    sync_megatron_adaptor_args,
 )
 
 if TYPE_CHECKING:
@@ -23,13 +23,13 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 __all__ = [
-    "apply_mindspeed_feature_defaults",
+    "apply_megatron_adaptor_feature_defaults",
     "bootstrap_npu_runtime",
     "ensure_npu_transformer_engine_symbols",
     "get_te_checkpoint_or_none",
     "initialize_megatron",
     "is_distribute_initialized",
-    "sync_mindspeed_args",
+    "sync_megatron_adaptor_args",
 ]
 
 
@@ -57,7 +57,7 @@ def _set_random_seed(seed_):
 
 def initialize_megatron(args: "TrainingArguments"):
     bootstrap_npu_runtime()
-    sync_mindspeed_args(args)
+    sync_megatron_adaptor_args(args)
     if not is_distribute_initialized():
         _initialize_distributed(args)
     _set_random_seed(args.seed)

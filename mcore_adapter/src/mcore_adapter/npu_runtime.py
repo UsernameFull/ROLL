@@ -1,6 +1,5 @@
 import importlib.util
 import sys
-import types
 from typing import TYPE_CHECKING
 
 import torch
@@ -16,7 +15,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Core NPU Megatron adaptor args that ROLL always overrides when deriving fp8/attention settings.
-_MINDSPEED_DERIVED_ARGS = frozenset({
+_MEGATRON_ADAPTOR_DERIVED_ARGS = frozenset({
     "transformer_impl",
     "fp8",
     "fp8_format",
@@ -33,55 +32,26 @@ def _has_megatron_training():
     return importlib.util.find_spec("megatron.training") is not None
 
 
-def _import_npu_megatron_adaptor():
+def _import_megatron_adaptor():
     try:
-        return __import__("mindspeed.megatron_adaptor")
-    except ImportError:
-        return None
+        return __import__("megatron_adaptor")
+    except ImportError as exc:
+        raise RuntimeError(
+            "MegatronAdaptor core_r0.17.0 is required to initialize Megatron on Ascend NPU."
+        ) from exc
 
 
-def _npu_megatron_adaptor_loaded():
-    return "mindspeed.megatron_adaptor" in sys.modules
+def _megatron_adaptor_loaded():
+    return "megatron_adaptor" in sys.modules
 
 
 def _npu_te_checkpoint(function, distribute_saved_activations, get_rng_state_tracker, tp_group, *args):
     return tensor_parallel.checkpoint(function, distribute_saved_activations, *args)
 
 
-def _ensure_npu_te_checkpoint_symbols(te_ext):
+def _ensure_npu_te_checkpoint_symbol(te_ext):
     if not hasattr(te_ext, "te_checkpoint"):
         te_ext.te_checkpoint = _npu_te_checkpoint
-
-    te_module = sys.modules.setdefault("transformer_engine", types.ModuleType("transformer_engine"))
-    pytorch_module = sys.modules.setdefault(
-        "transformer_engine.pytorch", types.ModuleType("transformer_engine.pytorch")
-    )
-    distributed_module = sys.modules.setdefault(
-        "transformer_engine.pytorch.distributed",
-        types.ModuleType("transformer_engine.pytorch.distributed"),
-    )
-    if not hasattr(distributed_module, "checkpoint"):
-        distributed_module.checkpoint = _npu_te_checkpoint
-    if not hasattr(te_module, "pytorch"):
-        te_module.pytorch = pytorch_module
-    if not hasattr(pytorch_module, "distributed"):
-        pytorch_module.distributed = distributed_module
-
-
-def _patch_loaded_npu_transformer_modules(te_norm):
-    for module_name in (
-        "megatron.core.models.gpt.gpt_layer_specs",
-        "mindspeed.core.models.gpt.gpt_layer_specs",
-        "megatron.core.transformer.transformer_block",
-        "mindspeed.core.transformer.transformer_block",
-    ):
-        module = sys.modules.get(module_name)
-        if module is None:
-            continue
-        if getattr(module, "TENorm", None) is not te_norm:
-            setattr(module, "TENorm", te_norm)
-        if getattr(module, "te_checkpoint", None) is None:
-            setattr(module, "te_checkpoint", _npu_te_checkpoint)
 
 
 def get_te_checkpoint_or_none():
@@ -98,14 +68,16 @@ def ensure_npu_transformer_engine_symbols():
 
     try:
         import megatron.core.extensions.transformer_engine as te_ext
-        from mindspeed.core.transformer.custom_layers.transformer_engine import TENorm
-    except ImportError:
-        return
+    except ImportError as exc:
+        raise RuntimeError(
+            "TransformerEngineNPU is required for Megatron FP8 on Ascend NPU."
+        ) from exc
 
-    if getattr(te_ext, "TENorm", None) is not TENorm:
-        te_ext.TENorm = TENorm
-    _ensure_npu_te_checkpoint_symbols(te_ext)
-    _patch_loaded_npu_transformer_modules(TENorm)
+    if not hasattr(te_ext, "TENorm"):
+        raise RuntimeError(
+            "TransformerEngineNPU did not provide megatron.core.extensions.transformer_engine.TENorm."
+        )
+    _ensure_npu_te_checkpoint_symbol(te_ext)
 
 
 def bootstrap_npu_runtime():
@@ -116,7 +88,7 @@ def bootstrap_npu_runtime():
 
     import torch_npu  # noqa: F401
 
-    _import_npu_megatron_adaptor()
+    _import_megatron_adaptor()
     ensure_npu_transformer_engine_symbols()
 
     import megatron.core.tensor_parallel.random as meg_random
@@ -147,37 +119,41 @@ def bootstrap_npu_runtime():
     _NPU_RUNTIME_BOOTSTRAPPED = True
 
 
-def apply_mindspeed_feature_defaults(config):
-    if not _npu_megatron_adaptor_loaded():
+def apply_megatron_adaptor_feature_defaults(config):
+    if not _megatron_adaptor_loaded():
         return
 
     try:
-        from mindspeed.args_utils import get_mindspeed_args
-    except ImportError:
-        return
+        from megatron_adaptor.utils.args_utils import get_mindspeed_args
+    except ImportError as exc:
+        raise RuntimeError(
+            "The installed MegatronAdaptor is incompatible: megatron_adaptor.utils.args_utils is missing."
+        ) from exc
 
     for name, value in vars(get_mindspeed_args(get_defaults=True)).items():
         if not hasattr(config, name):
             setattr(config, name, value)
 
 
-def sync_mindspeed_args(args: "TrainingArguments"):
-    if not _npu_megatron_adaptor_loaded():
+def sync_megatron_adaptor_args(args: "TrainingArguments"):
+    if not _megatron_adaptor_loaded():
         return
 
     try:
-        from mindspeed.args_utils import get_mindspeed_args
-    except ImportError:
-        return
+        from megatron_adaptor.utils.args_utils import get_mindspeed_args
+    except ImportError as exc:
+        raise RuntimeError(
+            "The installed MegatronAdaptor is incompatible: megatron_adaptor.utils.args_utils is missing."
+        ) from exc
 
-    mindspeed_args = get_mindspeed_args()
+    adaptor_args = get_mindspeed_args()
 
     # Auto-discover syncable args: any field present on both ROLL TrainingArguments
-    # and MindSpeed is eligible.  The derived-args set ensures fp8/attention rules
+    # and MegatronAdaptor is eligible. The derived-args set ensures fp8/attention rules
     # are applied even when the source arg was not directly set on args.
-    mindspeed_arg_names = set(vars(get_mindspeed_args(get_defaults=True)))
+    adaptor_arg_names = set(vars(get_mindspeed_args(get_defaults=True)))
     updates = {}
-    for name in mindspeed_arg_names | _MINDSPEED_DERIVED_ARGS:
+    for name in adaptor_arg_names | _MEGATRON_ADAPTOR_DERIVED_ARGS:
         value = getattr(args, name, None)
         if value is not None:
             updates[name] = value
@@ -196,13 +172,13 @@ def sync_mindspeed_args(args: "TrainingArguments"):
 
     changed = False
     for name, value in updates.items():
-        if getattr(mindspeed_args, name, None) != value:
-            setattr(mindspeed_args, name, value)
+        if getattr(adaptor_args, name, None) != value:
+            setattr(adaptor_args, name, value)
             changed = True
 
     if changed and current_platform.is_npu() and _has_megatron_training():
         try:
-            megatron_adaptor = sys.modules.get("mindspeed.megatron_adaptor")
+            megatron_adaptor = sys.modules.get("megatron_adaptor")
 
             if megatron_adaptor is not None and hasattr(megatron_adaptor, "repatch"):
                 megatron_adaptor.repatch(updates)

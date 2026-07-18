@@ -230,7 +230,7 @@ class DistributingParallelArguments:
     )
     micro_batch_size: Optional[int] = field(
         default=None,
-        metadata={"help": "Megatron/MindSpeed alias for per_device_train_batch_size."},
+        metadata={"help": "MegatronAdaptor alias for per_device_train_batch_size."},
     )
     transformer_impl: Optional[Literal["local", "transformer_engine"]] = field(
         default=None,
@@ -280,17 +280,17 @@ class DistributingParallelArguments:
     fp8_format: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Alias of fp8 used by MindSpeed on Ascend. If omitted, fp8 is used.",
+            "help": "Alias of fp8 used by MegatronAdaptor on Ascend. If omitted, fp8 is used.",
         },
     )
     use_flash_attn: Optional[bool] = field(
         default=None,
-        metadata={"help": "Forward MindSpeed NPU flash attention switch when MindSpeed is available."},
+        metadata={"help": "Forward the MegatronAdaptor NPU flash attention switch."},
     )
     use_flash_attn_npu_batch_invariant: Optional[bool] = field(
         default=None,
         metadata={
-            "help": "Use MindSpeed flash-attn-npu batch-invariant attention. "
+            "help": "Use MegatronAdaptor flash-attn-npu batch-invariant attention. "
             "When enabled on NPU, use_flash_attn is forced to False to avoid duplicate attention patches.",
         },
     )

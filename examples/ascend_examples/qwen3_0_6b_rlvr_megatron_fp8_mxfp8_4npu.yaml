@@ -3,7 +3,7 @@ hydra:
     dir: .
   output_subdir: null
 
-exp_name: "qwen3-30BA3B-rlvr-megatron-fp8-vllm-mxfp8-4npu"
+exp_name: "qwen3-0.6B-rlvr-megatron-fp8-vllm-mxfp8-4npu"
 seed: 42
 logging_dir: ./output/logs
 output_dir: ./output
@@ -55,8 +55,8 @@ length_loss_weight: false
 add_token_level_kl: false
 whiten_advantages: true
 
-pretrain: Qwen/Qwen3-30B-A3B
-reward_pretrain: Qwen/Qwen3-30B-A3B
+pretrain: Qwen/Qwen3-0.6B
+reward_pretrain: Qwen/Qwen3-0.6B
 
 actor_train:
   model_args:
@@ -155,4 +155,3 @@ rewards:
     tag_included: [deepmath_103k, aime]
     world_size: 4
     infer_batch_size: 1
-

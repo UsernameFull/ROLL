@@ -1,7 +1,7 @@
 import gc
 import hashlib
 import json
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from contextlib import nullcontext
 from typing import Iterable, Optional, Tuple
 
@@ -492,20 +492,24 @@ class WorkerBase:
     # ------------------------------------------------------------------
 
     def _prepare_weights_for_loading(self, model, named_params):
-        """Restore HF shapes and quantize weights for Ascend MXFP8 models.
+        """Restore HF shapes before loading live MXFP8 weights.
 
         The restore step is skipped on the very first weight sync because
         process_weights_after_loading has not run yet (no NPU layout
         transformations applied), so there is nothing to undo.
+
+        Keep the incoming tensors in their logical BF16/FP16 checkpoint shape.
+        vLLM's packed QKV/MLP loaders must shard those logical tensors before
+        the patched linear loader performs Ascend MXFP8 quantization.  Doing
+        dynamic MX quantization here changes the physical tensor shape (for
+        example Qwen3 Q projection 2048 -> 1536) and makes the packed loader
+        slice the quantized representation as if it were an HF weight.
         """
         if not self._is_mxfp8_model:
             return named_params
         if self._mxfp8_transformation_applied:
             restore_mxfp8_weights_for_loading(model)
-        return _quantize_mxfp8_weights_for_loading(
-            named_params, model,
-            dtype=getattr(self.model_config, "dtype", torch.bfloat16),
-        )
+        return named_params
 
     def _finalize_weight_loading(self, model):
         """Apply MXFP8 transforms and invalidate ACL graphs after load_weights."""
@@ -617,18 +621,17 @@ class WorkerBase:
             return
 
         self.reload_model()
-        last_parameter = None
+        recent_parameters = deque(maxlen=12)
 
         def traced_named_params():
-            nonlocal last_parameter
             for name, weight in named_params:
-                last_parameter = (name, tuple(weight.shape), weight.dtype)
+                recent_parameters.append((name, tuple(weight.shape), weight.dtype))
                 yield name, weight
 
         try:
             self._load_weights_internal(self.model_runner.model, traced_named_params())
         except Exception:
-            logger.exception("Failed to update vLLM parameter %s", last_parameter)
+            logger.exception("Failed to update vLLM parameters; recent inputs: %s", list(recent_parameters))
             raise
 
     def process_weights_after_loading(self):

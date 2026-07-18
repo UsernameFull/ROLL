@@ -1284,7 +1284,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         # if self.enable_router_replay and self.router_replay_mode == "R3":
             # RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
 
-        logger.info(f"{self.model.get_models()}")
+        # logger.info(f"{self.model.get_models()}")
         if self.megatron_train_args.compile_warmup and self.worker.rank_info.pp_size > 1:
             compile_warmup_pipeline_stages(self)
 

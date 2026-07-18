@@ -494,10 +494,6 @@ class WorkerBase:
     def _prepare_weights_for_loading(self, model, named_params):
         """Restore HF shapes before loading live MXFP8 weights.
 
-        The restore step is skipped on the very first weight sync because
-        process_weights_after_loading has not run yet (no NPU layout
-        transformations applied), so there is nothing to undo.
-
         Keep the incoming tensors in their logical BF16/FP16 checkpoint shape.
         vLLM's packed QKV/MLP loaders must shard those logical tensors before
         the patched linear loader performs Ascend MXFP8 quantization.  Doing
@@ -507,8 +503,12 @@ class WorkerBase:
         """
         if not self._is_mxfp8_model:
             return named_params
-        if self._mxfp8_transformation_applied:
-            restore_mxfp8_weights_for_loading(model)
+        # This is safe before the first transformation because the restore
+        # helper only visits modules marked by vLLM-Ascend as transformed.
+        # Do not rely on _mxfp8_transformation_applied here: custom_init_worker
+        # may run after vLLM's initial post-load transform and reset that local
+        # lifecycle flag while the model already has packed NPU parameters.
+        restore_mxfp8_weights_for_loading(model)
         return named_params
 
     def _finalize_weight_loading(self, model):

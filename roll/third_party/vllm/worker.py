@@ -617,7 +617,19 @@ class WorkerBase:
             return
 
         self.reload_model()
-        self._load_weights_internal(self.model_runner.model, named_params)
+        last_parameter = None
+
+        def traced_named_params():
+            nonlocal last_parameter
+            for name, weight in named_params:
+                last_parameter = (name, tuple(weight.shape), weight.dtype)
+                yield name, weight
+
+        try:
+            self._load_weights_internal(self.model_runner.model, traced_named_params())
+        except Exception:
+            logger.exception("Failed to update vLLM parameter %s", last_parameter)
+            raise
 
     def process_weights_after_loading(self):
         if not current_platform.is_npu():

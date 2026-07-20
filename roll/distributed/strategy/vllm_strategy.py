@@ -376,7 +376,10 @@ class VllmStrategy(InferenceStrategy):
                 await self.model.offload_states(self.sleep_level)
                 self.is_model_in_gpu = False
         clear_memory()
-    
+
+    async def begin_model_update(self, *args, **kwargs):
+        await self.model.begin_model_update()
+
     async def process_weights_after_loading(self,*args, **kwargs):
         await self.model.process_weights_after_loading()
 

@@ -471,14 +471,16 @@ class WorkerBase:
         # Detect MXFP8 once at init time.
         quant_config = _quant_config_from_model(self.model_runner)
         self._is_mxfp8_model: bool = is_mxfp8_ascend(quant_config)
-        # Tracks whether NPU layout transformations have been applied to the
-        # current model weights.  False until the first process_weights_after_loading
-        # or _finalize_weight_loading call; used to skip the restore step on the
-        # very first RL weight sync (nothing to restore yet).
-        self._mxfp8_transformation_applied: bool = False
+        lifecycle = Mxfp8WeightLifecycle(self.model_runner.model)
+        self._mxfp8_transformation_applied: bool = self._is_mxfp8_model and any(
+            bool(getattr(module, "_mxfp8_transformed", False))
+            for _name, module in lifecycle.iter_runtime_modules()
+        )
+        self._model_update_in_progress: bool = False
         logger.info(
-            "MXFP8 worker detection: enabled=%s quant_config=%s",
+            "MXFP8 worker detection: enabled=%s transformed=%s quant_config=%s",
             self._is_mxfp8_model,
+            self._mxfp8_transformation_applied,
             type(quant_config).__name__ if quant_config is not None else None,
         )
 
@@ -486,6 +488,20 @@ class WorkerBase:
         if not self.weight_loaded:
             self.wake_up(["weights"])
             self.weight_loaded = True
+
+    def begin_model_update(self):
+        if not self._is_mxfp8_model:
+            return
+        if self._model_update_in_progress:
+            raise RuntimeError("MXFP8 model update is already in progress")
+
+        self.reload_model()
+        if self._mxfp8_transformation_applied:
+            restore_mxfp8_weights_for_loading(self.model_runner.model)
+            self._mxfp8_transformation_applied = False
+
+        self._model_update_in_progress = True
+        logger.info("MXFP8: began bucketed model update transaction")
 
     # ------------------------------------------------------------------
     # Shared MXFP8 weight-loading helpers
@@ -503,12 +519,11 @@ class WorkerBase:
         """
         if not self._is_mxfp8_model:
             return named_params
-        # This is safe before the first transformation because the restore
-        # helper only visits modules marked by vLLM-Ascend as transformed.
-        # Do not rely on _mxfp8_transformation_applied here: custom_init_worker
-        # may run after vLLM's initial post-load transform and reset that local
-        # lifecycle flag while the model already has packed NPU parameters.
-        restore_mxfp8_weights_for_loading(model)
+        if self._model_update_in_progress:
+            return named_params
+        if self._mxfp8_transformation_applied:
+            restore_mxfp8_weights_for_loading(model)
+            self._mxfp8_transformation_applied = False
         return named_params
 
     def _finalize_weight_loading(self, model):
@@ -529,7 +544,8 @@ class WorkerBase:
         named_params = list(self._prepare_weights_for_loading(model, named_params))
         with _temporary_parameter_subclass_types(model):
             model.load_weights(weights=named_params)
-        self._finalize_weight_loading(model)
+        if not (self._is_mxfp8_model and self._model_update_in_progress):
+            self._finalize_weight_loading(model)
         return named_params
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
@@ -635,6 +651,16 @@ class WorkerBase:
             raise
 
     def process_weights_after_loading(self):
+        if self._is_mxfp8_model and self._model_update_in_progress:
+            self._finalize_weight_loading(self.model_runner.model)
+            self._model_update_in_progress = False
+            logger.info("MXFP8: committed bucketed model update transaction")
+            return
+
+        if self._is_mxfp8_model and self._mxfp8_transformation_applied:
+            logger.info("MXFP8: post-load transformation already applied; skipping duplicate")
+            return
+
         if not current_platform.is_npu():
             vllm_ver = Version(vllm.__version__)
             is_supported = (

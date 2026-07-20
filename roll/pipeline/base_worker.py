@@ -536,7 +536,12 @@ class InferWorker(Worker):
 
     async def abort_requests(self, request_ids):
         await self.strategy.abort_requests(request_ids)
-    
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    async def begin_model_update(self):
+        if getattr(self, "strategy", None) is not None:
+            await self.strategy.begin_model_update()
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     async def process_weights_after_loading(self):
         if getattr(self, "strategy", None) is not None:

@@ -429,6 +429,15 @@ def reduce_metrics(metrics: dict, reduce_func=np.mean) -> dict:
         # No aggregation specifier found → use default
         return reduce_func
 
+    def _to_cpu_numpy(value):
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().numpy()
+        if isinstance(value, list):
+            return [_to_cpu_numpy(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(_to_cpu_numpy(item) for item in value)
+        return value
+
     for key, val in list(metrics.items()):
         # Skip reduction for scalars and tensors
         if isinstance(val, (int, float, np.number)) or isinstance(val, torch.Tensor):
@@ -438,6 +447,7 @@ def reduce_metrics(metrics: dict, reduce_func=np.mean) -> dict:
         if isinstance(val, (list, tuple, np.ndarray)):
             if len(val) == 0:
                 continue
+            val = _to_cpu_numpy(val)
             agg_func = _parse_aggregation_func(key)
             metrics[key] = float(agg_func(val))
         else:

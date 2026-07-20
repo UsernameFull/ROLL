@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import requantize_
 
 from roll.utils.fp8 import (
     per_block_fp8_quant,
+    per_block_fp8_quant_ascend,
     is_mxfp8_ascend,
     load_mxfp8_weight,
 )
@@ -276,12 +277,72 @@ def _fp8_linear_create_weights(
         layer.register_parameter("input_scale", None)
 
 
+def _ascend_mxfp8_linear_weight_loader(
+    layer: weakref.ReferenceType,
+    original_weight_loader,
+    original_scale_loader,
+    param: torch.Tensor,
+    loaded_weight: torch.Tensor,
+    *args,
+    **kwargs,
+) -> None:
+    layer = layer()
+    assert param is layer.weight
+    target_device = layer.weight.device
+    with target_device:
+        if loaded_weight.dtype == torch.float8_e4m3fn:
+            original_weight_loader(param, loaded_weight.to(target_device), *args, **kwargs)
+            return
+
+        qweight, scale = per_block_fp8_quant_ascend(
+            loaded_weight.to(target_device),
+            dtype=getattr(layer, "params_dtype", torch.bfloat16),
+        )
+        original_weight_loader(param, qweight, *args, **kwargs)
+        original_scale_loader(layer.weight_scale, scale, *args, **kwargs)
+
+
+def _ascend_linear_create_weights(
+    self,
+    layer: torch.nn.Module,
+    input_size_per_partition: int,
+    output_partition_sizes: List[int],
+    input_size: int,
+    output_size: int,
+    params_dtype: torch.dtype,
+    **extra_weight_attrs,
+):
+    _original_ascend_linear_create_weights(
+        self,
+        layer,
+        input_size_per_partition,
+        output_partition_sizes,
+        input_size,
+        output_size,
+        params_dtype,
+        **extra_weight_attrs,
+    )
+    if self.quant_method.__class__.__name__ != "AscendW8A8MXFP8DynamicLinearMethod":
+        return
+
+    original_weight_loader = layer.weight.weight_loader
+    original_scale_loader = layer.weight_scale.weight_loader
+    layer.weight.weight_loader = partial(
+        _ascend_mxfp8_linear_weight_loader,
+        weakref.ref(layer),
+        original_weight_loader,
+        original_scale_loader,
+    )
+    layer._roll_mxfp8 = True
+
+
 # Placeholders so function bodies that reference these as globals can be defined
 # before _apply_fp8_monkey_patches() captures the real originals at the bottom.
 _original_fp8_linear_create_weights: object = None
 _original_fp8_linear_process_weights_after_loading: object = None
 _original_fp8_moe_create_weights: object = None
 _original_fp8_moe_process_weights_after_loading: object = None
+_original_ascend_linear_create_weights: object = None
 
 
 def _fp8_linear_process_weights_after_loading(self, layer: Module) -> None:
@@ -702,6 +763,7 @@ def _apply_fp8_monkey_patches() -> None:
     global _FP8_MONKEY_PATCHES_APPLIED
     global _original_fp8_linear_create_weights, _original_fp8_linear_process_weights_after_loading
     global _original_fp8_moe_create_weights, _original_fp8_moe_process_weights_after_loading
+    global _original_ascend_linear_create_weights
 
     if _FP8_MONKEY_PATCHES_APPLIED:
         return
@@ -710,6 +772,14 @@ def _apply_fp8_monkey_patches() -> None:
     _original_fp8_linear_process_weights_after_loading = Fp8LinearMethod.process_weights_after_loading
     _original_fp8_moe_create_weights = Fp8MoEMethod.create_weights
     _original_fp8_moe_process_weights_after_loading = Fp8MoEMethod.process_weights_after_loading
+
+    try:
+        from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+    except ImportError:
+        AscendLinearMethod = None
+    if AscendLinearMethod is not None:
+        _original_ascend_linear_create_weights = AscendLinearMethod.create_weights
+        AscendLinearMethod.create_weights = _ascend_linear_create_weights
 
     Fp8LinearMethod.create_weights = _fp8_linear_create_weights
     Fp8LinearMethod.process_weights_after_loading = _select_fp8_linear_process_weights_after_loading()

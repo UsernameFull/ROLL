@@ -1,0 +1,108 @@
+FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.1-950-ubuntu22.04-py3.12
+
+ARG ROLL_REPO=https://github.com/UsernameFull/ROLL.git
+ARG MEGATRON_COMMIT=963bf39218e8bb83a1203b40293358498322be50
+ARG TRANSFORMER_ENGINE_NPU_COMMIT=48378a9cefdba637eb3f457badb043ec4c1d622e
+ARG MEGATRON_ADAPTOR_COMMIT=d2fb23d75b8f7875079dfa3b52a5e4429d45aa9d
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_ROOT_USER_ACTION=ignore \
+    PIP_INDEX_URL=https://repo.huaweicloud.com/repository/pypi/simple \
+    ASCEND_PYPI_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi \
+    VLLM_TARGET_DEVICE=empty \
+    ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest \
+    SOC_VERSION=ascend950pr_9599 \
+    Torch_DIR=/usr/local/python3.12.13/lib/python3.12/site-packages/torch/share/cmake/Torch \
+    HF_ENDPOINT=https://hf-mirror.com \
+    VLLM_USE_MODELSCOPE=True \
+    PYTORCH_NPU_ALLOC_CONF=expandable_segments:True \
+    TASK_QUEUE_ENABLE=2 \
+    HCCL_NPU_SOCKET_PORT_RANGE=auto
+
+SHELL ["/bin/bash", "-c"]
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    cmake \
+    curl \
+    git \
+    git-lfs \
+    iproute2 \
+    ninja-build \
+    openjdk-17-jdk \
+    pkg-config \
+    tmux \
+    zip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --upgrade pip setuptools wheel \
+    && python3 -m pip install --index-url https://download.pytorch.org/whl/cpu \
+        torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 \
+    && python3 -m pip install --index-url ${ASCEND_PYPI_URL} --no-deps torch-npu==2.10.0.post2 \
+    && python3 -m pip install --index-url ${ASCEND_PYPI_URL} triton-ascend==3.2.1 \
+    && python3 -m pip install numpy==1.26.4 opencv-python-headless==4.10.0.84
+
+WORKDIR /workspace
+
+RUN git clone --depth 1 --branch v0.23.0 https://github.com/vllm-project/vllm.git vllm-v0.23.0 \
+    && git clone --depth 1 --branch v0.23.0rc1 https://github.com/vllm-project/vllm-ascend.git vllm-ascend-v0.23.0rc1 \
+    && git clone --depth 1 --branch npu_fp8 ${ROLL_REPO} ROLL \
+    && git clone --depth 1 --branch core_r0.17.0 https://github.com/NVIDIA/Megatron-LM.git Megatron-LM \
+    && git clone --depth 1 https://github.com/Ascend/TransformerEngineNPU.git TransformerEngineNPU \
+    && git clone --depth 1 --branch core_r0.17.0 https://github.com/Ascend/MegatronAdaptor.git MegatronAdaptor \
+    && cd /workspace/Megatron-LM && git fetch --depth 1 origin ${MEGATRON_COMMIT} && git checkout ${MEGATRON_COMMIT} \
+    && cd /workspace/TransformerEngineNPU && git fetch --depth 1 origin ${TRANSFORMER_ENGINE_NPU_COMMIT} && git checkout ${TRANSFORMER_ENGINE_NPU_COMMIT} \
+    && cd /workspace/MegatronAdaptor && git fetch --depth 1 origin ${MEGATRON_ADAPTOR_COMMIT} && git checkout ${MEGATRON_ADAPTOR_COMMIT}
+
+RUN source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh \
+    && source /usr/local/Ascend/nnal/atb/set_env.sh \
+    && python3 -m pip install -r /workspace/vllm-v0.23.0/requirements/common.txt \
+    && python3 -m pip install numpy==1.26.4 opencv-python-headless==4.10.0.84 \
+    && python3 -m pip install --no-build-isolation --no-deps -e /workspace/vllm-v0.23.0 \
+    && python3 -m pip install cmake decorator msgpack numba pandas pandas-stubs pybind11 quart scipy setuptools-scm \
+    && python3 -m pip install --no-build-isolation --no-deps -e /workspace/vllm-ascend-v0.23.0rc1
+
+RUN source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh \
+    && source /usr/local/Ascend/nnal/atb/set_env.sh \
+    && python3 -m pip install -r /workspace/ROLL/requirements_common.txt \
+    && python3 -m pip install deepspeed==0.16.4 tensorboard \
+    && python3 -m pip install --no-build-isolation -e /workspace/Megatron-LM \
+    && python3 -m pip install --no-build-isolation -e /workspace/TransformerEngineNPU \
+    && python3 -m pip install --no-build-isolation -e /workspace/MegatronAdaptor \
+    && python3 -m pip install --no-build-isolation -e /workspace/ROLL
+
+RUN printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh' \
+    'source /usr/local/Ascend/nnal/atb/set_env.sh' \
+    'export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest' \
+    'export SOC_VERSION=ascend950pr_9599' \
+    'export Torch_DIR=/usr/local/python3.12.13/lib/python3.12/site-packages/torch/share/cmake/Torch' \
+    'export PYTHONPATH=/workspace/ROLL/mcore_adapter/src:/workspace/ROLL:${PYTHONPATH:-}' \
+    'export HF_ENDPOINT=https://hf-mirror.com' \
+    'export VLLM_USE_MODELSCOPE=True' \
+    'export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True' \
+    'export TASK_QUEUE_ENABLE=2' \
+    'export HCCL_NPU_SOCKET_PORT_RANGE=auto' \
+    > /workspace/roll_env.sh \
+    && chmod 0644 /workspace/roll_env.sh \
+    && cp /workspace/roll_env.sh /etc/profile.d/roll.sh
+
+RUN printf '%s\n' \
+    'import os' \
+    'import torch' \
+    'import torch.distributed as dist' \
+    'import torch_npu' \
+    '' \
+    'local_rank = int(os.environ["LOCAL_RANK"])' \
+    'torch.npu.set_device(local_rank)' \
+    'dist.init_process_group(backend="hccl")' \
+    'value = torch.tensor([float(local_rank + 1)], device=f"npu:{local_rank}")' \
+    'dist.all_reduce(value)' \
+    'print(f"rank={dist.get_rank()} local_rank={local_rank} all_reduce={value.item()} OK", flush=True)' \
+    'dist.destroy_process_group()' \
+    > /workspace/hccl_smoke.py
+
+WORKDIR /workspace/ROLL
+CMD ["bash"]

@@ -1,12 +1,26 @@
+import json
+
 import numpy as np
 import torch
 
 from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.base_worker import ActorWorker as BaseActorWorker
-from roll.utils.functionals import masked_mean, agg_loss, compute_approx_kl
+from roll.pipeline.rlvr.logprob_diagnostics import (
+    LOG_PREFIX,
+    PRIVATE_METRIC_PREFIX,
+    build_ratio_statistics,
+    build_token_logprob_records,
+    diagnostics_enabled,
+)
+from roll.utils.functionals import agg_loss, compute_approx_kl, masked_mean, reduce_metrics
 from roll.utils.train_infer_corrections import compute_train_infer_correction
 
+
 class ActorWorker(BaseActorWorker):
+
+    def __init__(self, worker_config):
+        super().__init__(worker_config=worker_config)
+        self._logged_first_logprob_detail = False
 
     def loss_func(self, data: DataProto, output_tensor: torch.Tensor):
         """
@@ -103,6 +117,42 @@ class ActorWorker(BaseActorWorker):
         clipped_high = (ratio > 1 + pg_clip_high).float()
         clipped = (clipped_low + clipped_high).float()
 
+        global_step = data.meta_info.get("global_step", 0)
+        optimizer_batch_idx = data.meta_info.get("optimizer_batch_idx", -1)
+        log_diagnostics = diagnostics_enabled(global_step=global_step, rank=self.rank)
+        ratio_statistics = {}
+        if log_diagnostics:
+            try:
+                ratio_statistics = build_ratio_statistics(ratio, response_mask)
+            except Exception as exc:
+                self.logger.warning(f"{LOG_PREFIX} failed to compute ratio statistics: {exc}")
+
+        if log_diagnostics and optimizer_batch_idx == 0 and not self._logged_first_logprob_detail:
+            self._logged_first_logprob_detail = True
+            try:
+                records = build_token_logprob_records(
+                    input_ids=data.batch["input_ids"],
+                    response_mask=response_mask,
+                    current_log_probs=log_probs,
+                    old_log_probs=old_log_probs,
+                    infer_log_probs=infer_log_probs,
+                    ref_log_probs=ref_log_probs,
+                )
+                self.logger.info(
+                    f"{LOG_PREFIX} "
+                    + json.dumps(
+                        {
+                            "event": "first_optimizer_batch_token_logprobs",
+                            "global_step": global_step,
+                            "optimizer_batch_idx": optimizer_batch_idx,
+                            "records": records,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            except Exception as exc:
+                self.logger.warning(f"{LOG_PREFIX} failed to format token logprobs: {exc}")
+
         if self.pipeline_config.use_kl_loss:
             total_loss = weighted_pg_loss + kl_loss * self.pipeline_config.kl_loss_coef
         else:
@@ -164,7 +214,55 @@ class ActorWorker(BaseActorWorker):
             **train_infer_metric,
         }
 
+        for key, value in ratio_statistics.items():
+            pg_metrics[f"{PRIVATE_METRIC_PREFIX}{key}"] = value
+
         return total_loss, pg_metrics
+
+    def log_optimizer_batch_diagnostics(self, global_step: int, batch_idx: int, metrics: dict) -> dict:
+        if not diagnostics_enabled(global_step=global_step, rank=self.rank):
+            return metrics
+
+        try:
+            reduced = reduce_metrics(dict(metrics))
+            lr = None
+            if self.strategy is not None and self.strategy.scheduler is not None:
+                lr = self.strategy.scheduler.get_last_lr()[0]
+
+            def metric(name):
+                value = reduced.get(name)
+                if isinstance(value, torch.Tensor):
+                    return value.detach().float().item()
+                if isinstance(value, np.generic):
+                    return value.item()
+                return value
+
+            payload = {
+                "event": "optimizer_batch_complete",
+                "global_step": global_step,
+                "optimizer_batch_idx": batch_idx,
+                "ratio_mean": metric("actor/ratio_mean@sum"),
+                "ratio_min": metric("actor/ratio_min@min"),
+                "ratio_max": metric("actor/ratio_max@max"),
+                "ratio_p01_microbatch_mean": metric(f"{PRIVATE_METRIC_PREFIX}ratio_p01"),
+                "ratio_median_microbatch_mean": metric(f"{PRIVATE_METRIC_PREFIX}ratio_median"),
+                "ratio_p99_microbatch_mean": metric(f"{PRIVATE_METRIC_PREFIX}ratio_p99"),
+                "ratio_nonfinite_fraction_microbatch_mean": metric(
+                    f"{PRIVATE_METRIC_PREFIX}ratio_nonfinite_fraction"
+                ),
+                "approxkl": metric("actor/approxkl@sum"),
+                "policykl": metric("actor/policykl@sum"),
+                "clipfrac_low": metric("actor/ppo_ratio_low_clipfrac@sum"),
+                "clipfrac_high": metric("actor/ppo_ratio_high_clipfrac@sum"),
+                "clipfrac_total": metric("actor/ppo_ratio_clipfrac@sum"),
+                "grad_norm": metric(f"{self.worker_config.name}/grad_norm"),
+                "lr_after_update": float(lr) if lr is not None else None,
+            }
+            self.logger.info(f"{LOG_PREFIX} " + json.dumps(payload, ensure_ascii=False))
+        except Exception as exc:
+            self.logger.warning(f"{LOG_PREFIX} failed to format optimizer batch metrics: {exc}")
+
+        return {key: value for key, value in metrics.items() if not key.startswith(PRIVATE_METRIC_PREFIX)}
 
     def compute_sample_weights(self, data: DataProto, response_mask: torch.Tensor):
         """

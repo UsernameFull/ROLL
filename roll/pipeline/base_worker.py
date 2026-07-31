@@ -67,6 +67,7 @@ class ActorWorker(Worker):
         global_step = data.meta_info.get("global_step", 0)
         is_offload_states = data.meta_info.get("is_offload_states", True)
         metrics = {}
+        self.prepare_train_step_diagnostics(global_step=global_step)
         self.logger.info(f"{self.worker_name} generate global step {global_step}")
 
         with state_offload_manger(
@@ -129,8 +130,18 @@ class ActorWorker(Worker):
             data.to("cpu")
 
         self._logprobs_cache.clear()
-        output = DataProto(meta_info={"metrics": metrics})
+        output_meta_info = {"metrics": metrics}
+        output_meta_info.update(self.collect_train_step_meta_info())
+        output = DataProto(meta_info=output_meta_info)
         return output
+
+    def prepare_train_step_diagnostics(self, global_step: int) -> None:
+        """Hook for pipeline-specific diagnostic state initialized per train step."""
+        pass
+
+    def collect_train_step_meta_info(self) -> Dict:
+        """Return pipeline-specific metadata that should be sent back to the driver."""
+        return {}
 
     def log_optimizer_batch_diagnostics(self, global_step: int, batch_idx: int, metrics: Dict) -> Dict:
         """Hook for pipeline-specific diagnostics after one optimizer update."""

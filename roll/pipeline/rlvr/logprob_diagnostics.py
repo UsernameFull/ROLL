@@ -5,6 +5,7 @@ import torch
 
 
 LOG_PREFIX = "[RLVR_LOGPROB_DIAG]"
+DIAGNOSTICS_META_KEY = "rlvr_logprob_diagnostics"
 PRIVATE_METRIC_PREFIX = "_rlvr_logprob_diag/"
 
 

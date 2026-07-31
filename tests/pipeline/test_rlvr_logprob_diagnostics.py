@@ -2,11 +2,33 @@ import math
 
 import torch
 
+from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.rlvr.logprob_diagnostics import (
+    DIAGNOSTICS_META_KEY,
     build_ratio_statistics,
     build_token_logprob_records,
     diagnostics_enabled,
 )
+
+
+def test_diagnostics_meta_info_keeps_rank_zero_payload():
+    rank_zero = DataProto(
+        meta_info={
+            "metrics": {"loss": 1.0},
+            DIAGNOSTICS_META_KEY: [{"event": "rank_zero"}],
+        }
+    )
+    rank_one = DataProto(
+        meta_info={
+            "metrics": {"loss": 2.0},
+            DIAGNOSTICS_META_KEY: [{"event": "rank_one"}],
+        }
+    )
+
+    merged = DataProto.concat([rank_zero, rank_one])
+
+    assert merged.meta_info[DIAGNOSTICS_META_KEY] == [{"event": "rank_zero"}]
+    assert merged.meta_info["metrics"]["loss"] == [1.0, 2.0]
 
 
 def test_diagnostics_enabled_only_for_first_step_rank_zero():

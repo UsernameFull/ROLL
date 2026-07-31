@@ -1,12 +1,10 @@
-import json
-
 import numpy as np
 import torch
 
 from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.base_worker import ActorWorker as BaseActorWorker
 from roll.pipeline.rlvr.logprob_diagnostics import (
-    LOG_PREFIX,
+    DIAGNOSTICS_META_KEY,
     PRIVATE_METRIC_PREFIX,
     build_ratio_statistics,
     build_token_logprob_records,
@@ -21,6 +19,17 @@ class ActorWorker(BaseActorWorker):
     def __init__(self, worker_config):
         super().__init__(worker_config=worker_config)
         self._logged_first_logprob_detail = False
+        self._driver_logprob_diagnostics = []
+
+    def prepare_train_step_diagnostics(self, global_step: int) -> None:
+        self._driver_logprob_diagnostics = []
+
+    def collect_train_step_meta_info(self) -> dict:
+        diagnostics = self._driver_logprob_diagnostics
+        self._driver_logprob_diagnostics = []
+        if not diagnostics:
+            return {}
+        return {DIAGNOSTICS_META_KEY: diagnostics}
 
     def loss_func(self, data: DataProto, output_tensor: torch.Tensor):
         """
@@ -125,7 +134,7 @@ class ActorWorker(BaseActorWorker):
             try:
                 ratio_statistics = build_ratio_statistics(ratio, response_mask)
             except Exception as exc:
-                self.logger.warning(f"{LOG_PREFIX} failed to compute ratio statistics: {exc}")
+                self.logger.warning(f"RLVR logprob diagnostic failed to compute ratio statistics: {exc}")
 
         if log_diagnostics and optimizer_batch_idx == 0 and not self._logged_first_logprob_detail:
             self._logged_first_logprob_detail = True
@@ -138,20 +147,16 @@ class ActorWorker(BaseActorWorker):
                     infer_log_probs=infer_log_probs,
                     ref_log_probs=ref_log_probs,
                 )
-                self.logger.info(
-                    f"{LOG_PREFIX} "
-                    + json.dumps(
-                        {
-                            "event": "first_optimizer_batch_token_logprobs",
-                            "global_step": global_step,
-                            "optimizer_batch_idx": optimizer_batch_idx,
-                            "records": records,
-                        },
-                        ensure_ascii=False,
-                    )
+                self._driver_logprob_diagnostics.append(
+                    {
+                        "event": "first_optimizer_batch_token_logprobs",
+                        "global_step": global_step,
+                        "optimizer_batch_idx": optimizer_batch_idx,
+                        "records": records,
+                    }
                 )
             except Exception as exc:
-                self.logger.warning(f"{LOG_PREFIX} failed to format token logprobs: {exc}")
+                self.logger.warning(f"RLVR logprob diagnostic failed to format token logprobs: {exc}")
 
         if self.pipeline_config.use_kl_loss:
             total_loss = weighted_pg_loss + kl_loss * self.pipeline_config.kl_loss_coef
@@ -258,9 +263,9 @@ class ActorWorker(BaseActorWorker):
                 "grad_norm": metric(f"{self.worker_config.name}/grad_norm"),
                 "lr_after_update": float(lr) if lr is not None else None,
             }
-            self.logger.info(f"{LOG_PREFIX} " + json.dumps(payload, ensure_ascii=False))
+            self._driver_logprob_diagnostics.append(payload)
         except Exception as exc:
-            self.logger.warning(f"{LOG_PREFIX} failed to format optimizer batch metrics: {exc}")
+            self.logger.warning(f"RLVR logprob diagnostic failed to format optimizer batch metrics: {exc}")
 
         return {key: value for key, value in metrics.items() if not key.startswith(PRIVATE_METRIC_PREFIX)}
 

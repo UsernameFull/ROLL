@@ -20,9 +20,17 @@ class ActorWorker(BaseActorWorker):
         super().__init__(worker_config=worker_config)
         self._logged_first_logprob_detail = False
         self._driver_logprob_diagnostics = []
+        self._first_update_probe_before = None
 
     def prepare_train_step_diagnostics(self, global_step: int) -> None:
         self._driver_logprob_diagnostics = []
+        self._first_update_probe_before = None
+
+    def consume_first_update_probe_before(self):
+        """Return and clear the first optimizer batch's pre-update logprobs."""
+        probe = self._first_update_probe_before
+        self._first_update_probe_before = None
+        return probe
 
     def collect_train_step_meta_info(self) -> dict:
         diagnostics = self._driver_logprob_diagnostics
@@ -135,6 +143,12 @@ class ActorWorker(BaseActorWorker):
                 ratio_statistics = build_ratio_statistics(ratio, response_mask)
             except Exception as exc:
                 self.logger.warning(f"RLVR logprob diagnostic failed to compute ratio statistics: {exc}")
+
+        if log_diagnostics and optimizer_batch_idx == 0 and self._first_update_probe_before is None:
+            self._first_update_probe_before = {
+                "log_probs": log_probs.detach().to(device="cpu", dtype=torch.float32),
+                "response_mask": response_mask.detach().to(device="cpu", dtype=torch.bool),
+            }
 
         if log_diagnostics and optimizer_batch_idx == 0 and not self._logged_first_logprob_detail:
             self._logged_first_logprob_detail = True
@@ -265,6 +279,11 @@ class ActorWorker(BaseActorWorker):
                 "grad_norm": metric(f"{self.worker_config.name}/grad_norm"),
                 "lr_after_update": float(lr) if lr is not None else None,
             }
+            pop_update_probe = getattr(self.strategy, "pop_update_probe_diagnostics", None)
+            if pop_update_probe is not None:
+                update_probe = pop_update_probe()
+                if update_probe:
+                    payload.update(update_probe)
             self._driver_logprob_diagnostics.append(payload)
         except Exception as exc:
             self.logger.warning(f"RLVR logprob diagnostic failed to format optimizer batch metrics: {exc}")

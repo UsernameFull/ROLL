@@ -1,10 +1,14 @@
 import math
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import torch
 
 from roll.distributed.scheduler.protocol import DataProto
+from roll.pipeline.rlvr.actor_worker import ActorWorker
 from roll.pipeline.rlvr.logprob_diagnostics import (
     DIAGNOSTICS_META_KEY,
+    PRIVATE_METRIC_PREFIX,
     build_ratio_statistics,
     build_token_logprob_records,
     diagnostics_enabled,
@@ -107,3 +111,68 @@ def test_build_token_logprob_records_is_bounded_and_aligned():
     assert records[0]["sequence_position"] == 2
     assert records[0]["current_old_ratio"] == 1.0
     assert math.isclose(records[0]["old_infer_ratio"], math.e)
+
+
+def test_actor_worker_consumes_first_update_probe_before_once():
+    worker = ActorWorker.__new__(ActorWorker)
+    probe = {
+        "log_probs": torch.tensor([[-1.0, -2.0]]),
+        "response_mask": torch.tensor([[True, False]]),
+    }
+    worker._first_update_probe_before = probe
+
+    assert worker.consume_first_update_probe_before() is probe
+    assert worker.consume_first_update_probe_before() is None
+
+
+def test_actor_worker_merges_update_probe_into_optimizer_payload_and_removes_private_metrics():
+    update_probe = {
+        "parameter_update": {"update_norm": 0.25},
+        "logprob_delta": {"delta_rms": 0.5},
+    }
+    pop_update_probe = MagicMock(return_value=update_probe)
+    worker = ActorWorker.__new__(ActorWorker)
+    worker.rank = 0
+    worker.worker_config = SimpleNamespace(name="actor")
+    worker.strategy = SimpleNamespace(
+        scheduler=SimpleNamespace(get_last_lr=MagicMock(return_value=[1e-6])),
+        pop_update_probe_diagnostics=pop_update_probe,
+    )
+    worker._driver_logprob_diagnostics = []
+    worker.logger = MagicMock()
+    private_ratio_key = f"{PRIVATE_METRIC_PREFIX}ratio_mean"
+    metrics = {
+        private_ratio_key: 1.25,
+        "actor/ratio_min@min": 0.75,
+        "actor/ratio_max@max": 1.5,
+        "actor/approxkl@sum": 0.1,
+        "actor/grad_norm": 2.0,
+    }
+
+    public_metrics = worker.log_optimizer_batch_diagnostics(global_step=0, batch_idx=0, metrics=metrics)
+
+    pop_update_probe.assert_called_once_with()
+    assert private_ratio_key not in public_metrics
+    assert public_metrics["actor/approxkl@sum"] == 0.1
+    assert len(worker._driver_logprob_diagnostics) == 1
+    payload = worker._driver_logprob_diagnostics[0]
+    assert payload["event"] == "optimizer_batch_complete"
+    assert payload["ratio_mean"] == 1.25
+    assert payload["lr_after_update"] == 1e-6
+    assert payload["parameter_update"] == update_probe["parameter_update"]
+    assert payload["logprob_delta"] == update_probe["logprob_delta"]
+
+
+def test_actor_worker_skips_update_probe_outside_first_global_step():
+    pop_update_probe = MagicMock(return_value={"parameter_update": {"update_norm": 0.25}})
+    worker = ActorWorker.__new__(ActorWorker)
+    worker.rank = 0
+    worker.strategy = SimpleNamespace(pop_update_probe_diagnostics=pop_update_probe)
+    worker._driver_logprob_diagnostics = []
+    metrics = {f"{PRIVATE_METRIC_PREFIX}ratio_mean": 1.0, "actor/approxkl@sum": 0.0}
+
+    returned = worker.log_optimizer_batch_diagnostics(global_step=1, batch_idx=0, metrics=metrics)
+
+    assert returned is metrics
+    pop_update_probe.assert_not_called()
+    assert worker._driver_logprob_diagnostics == []

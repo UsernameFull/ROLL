@@ -68,6 +68,11 @@ from roll.third_party.megatron.router_replay_utils import (
     set_router_replay_data,
 )
 from roll.third_party.megatron.tensor_parallel import vocab_parallel_entropy
+from roll.third_party.megatron.update_diagnostics import (
+    build_masked_logprob_delta_statistics,
+    build_parameter_update_statistics,
+    snapshot_named_parameters,
+)
 from roll.third_party.megatron.util import unwrap_model
 from roll.utils.constants import (
     DIST_OPTIMIZER_DIR,
@@ -1156,6 +1161,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         self.models_unwrapped = None
         self.processor = None
         self._validate_access_integrity = True
+        self._update_probe_diagnostics = None
 
         # 新增：Router Replay 配置（用于 R2 和 R3 的 REPLAY）
         # 注意：这里会覆盖父类的配置，因为训练阶段的行为不同
@@ -1288,14 +1294,173 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
 
         dist.barrier()
 
+    def pop_update_probe_diagnostics(self):
+        """Return and clear the one-shot optimizer update diagnostics."""
+        diagnostics = self._update_probe_diagnostics
+        self._update_probe_diagnostics = None
+        return diagnostics
+
+    def _forward_logprob_probe(self, data: DataProto, output_tensor: torch.Tensor):
+        log_probs = self.op_compute_log_probs(
+            logits=output_tensor,
+            input_ids=data.batch["input_ids"],
+            attention_mask=data.batch["response_mask"],
+        )
+        zero_loss = torch.zeros((), device=output_tensor.device)
+        return zero_loss, {"log_probs": log_probs.detach()}
+
+    def _run_logprob_probe(self, batch: DataProto, *, disable_fp8: bool):
+        """Run a bounded no-grad logprob probe without changing persistent model mode."""
+        config = self.model.config
+        if disable_fp8 and getattr(config, "fp8_param", False):
+            return None, "bf16 shadow is unsupported when fp8_param=true"
+        if disable_fp8 and getattr(config, "num_moe_experts", None):
+            return None, "bf16 shadow is disabled for MoE to avoid changing router state"
+
+        saved_config = {}
+        if disable_fp8:
+            for field_name in ("fp8", "fp8_format"):
+                if hasattr(config, field_name):
+                    saved_config[field_name] = getattr(config, field_name)
+                    setattr(config, field_name, None)
+
+        training_modes = [model.training for model in self.model.get_models()]
+        probe_batch = batch.clone()
+        probe_batch.meta_info["micro_batch_size"] = max(len(probe_batch), 1)
+        try:
+            with torch.no_grad():
+                results = self.forward_step(batch=probe_batch, forward_func=self._forward_logprob_probe)
+            if results is None:
+                return None, None
+            return results["log_probs"].detach().to(device="cpu", dtype=torch.float32), None
+        except Exception as exc:
+            precision = "bf16" if disable_fp8 else "native"
+            logger.warning(f"RLVR {precision} logprob probe failed: {exc}")
+            return None, f"{type(exc).__name__}: {exc}"
+        finally:
+            for field_name, value in saved_config.items():
+                setattr(config, field_name, value)
+            for model, training in zip(self.model.get_models(), training_modes):
+                model.train(training)
+
+    def _reduce_parameter_update_statistics(self, local_statistics: dict, learning_rate: float | None) -> dict:
+        """Reduce raw update statistics over one model-parallel replica."""
+        sum_keys = (
+            "param_sq_sum",
+            "update_sq_sum",
+            "numel",
+            "changed_numel",
+            "param_nonfinite_numel",
+            "update_nonfinite_numel",
+            "tensor_count",
+        )
+        parameter = next(
+            parameter
+            for model in self.models_unwrapped
+            for parameter in model.parameters()
+            if parameter.requires_grad
+        )
+        sum_values = torch.tensor(
+            [float(local_statistics[key]) for key in sum_keys],
+            dtype=torch.float32,
+            device=parameter.device,
+        )
+        max_value = torch.tensor(
+            float(local_statistics["update_abs_max"]), dtype=torch.float32, device=parameter.device
+        )
+        if dist.is_initialized():
+            model_parallel_group = mpu.get_model_parallel_group()
+            dist.all_reduce(sum_values, op=dist.ReduceOp.SUM, group=model_parallel_group)
+            dist.all_reduce(max_value, op=dist.ReduceOp.MAX, group=model_parallel_group)
+
+        reduced = dict(zip(sum_keys, sum_values.cpu().tolist()))
+        param_norm = math.sqrt(max(reduced["param_sq_sum"], 0.0))
+        update_norm = math.sqrt(max(reduced["update_sq_sum"], 0.0))
+        relative_update = update_norm / param_norm if param_norm else None
+        changed_fraction = reduced["changed_numel"] / reduced["numel"] if reduced["numel"] else None
+        relative_update_per_lr = (
+            relative_update / learning_rate
+            if relative_update is not None and learning_rate is not None and learning_rate > 0
+            else None
+        )
+        return {
+            **reduced,
+            "parameter_kind": "model_forward_parameters",
+            "reduction_scope": "model_parallel_replica",
+            "update_abs_max": float(max_value.cpu().item()),
+            "param_norm": param_norm,
+            "update_norm": update_norm,
+            "relative_update_norm": relative_update,
+            "changed_fraction": changed_fraction,
+            "relative_update_per_lr": relative_update_per_lr,
+            "learning_rate_applied": learning_rate,
+            "top_parameters_local": local_statistics["top_parameters"],
+        }
+
+    def _build_logprob_probe_diagnostics(
+        self,
+        probe_batch: DataProto,
+        bf16_before: torch.Tensor | None,
+        bf16_before_error: str | None,
+    ) -> dict:
+        """Compare pre/post-update native and BF16-shadow logprobs."""
+        native_before = None
+        native_mask = None
+        consume_probe = getattr(self.worker, "consume_first_update_probe_before", None)
+        if consume_probe is not None:
+            before_payload = consume_probe()
+            if before_payload:
+                native_before = before_payload["log_probs"]
+                native_mask = before_payload["response_mask"]
+
+        bf16_after, bf16_after_error = self._run_logprob_probe(probe_batch, disable_fp8=True)
+        native_after, native_after_error = self._run_logprob_probe(probe_batch, disable_fp8=False)
+        probe_mask = probe_batch.batch["response_mask"][:, 1:].detach().to(device="cpu", dtype=torch.bool)
+
+        diagnostics = {
+            "native_precision": "fp8" if getattr(self.model.config, "fp8", None) else "bf16",
+            "native_probe_may_update_fp8_metadata": bool(getattr(self.model.config, "fp8", None)),
+            "native_error": native_after_error,
+            "bf16_before_error": bf16_before_error,
+            "bf16_after_error": bf16_after_error,
+        }
+        try:
+            if native_before is not None and native_after is not None and native_mask is not None:
+                diagnostics["native_after_vs_before"] = build_masked_logprob_delta_statistics(
+                    native_after, native_before, native_mask
+                )
+            if bf16_before is not None and bf16_after is not None:
+                diagnostics["bf16_after_vs_before"] = build_masked_logprob_delta_statistics(
+                    bf16_after, bf16_before, probe_mask
+                )
+            if native_before is not None and bf16_before is not None and native_mask is not None:
+                diagnostics["bf16_vs_native_before"] = build_masked_logprob_delta_statistics(
+                    bf16_before, native_before, native_mask
+                )
+            if native_after is not None and bf16_after is not None:
+                diagnostics["bf16_vs_native_after"] = build_masked_logprob_delta_statistics(
+                    bf16_after, native_after, probe_mask
+                )
+        except Exception as exc:
+            diagnostics["statistics_error"] = f"{type(exc).__name__}: {exc}"
+            logger.warning(f"RLVR post-update logprob statistics failed: {exc}")
+        return diagnostics
+
     def train_step(self, batch: DataProto, loss_func: Callable):
         self.model.train()
+        self._update_probe_diagnostics = None
 
         if self.enable_router_replay:
             assert "routed_experts" in batch.batch
             RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
 
         global_step = batch.meta_info.get("global_step", 0)
+        optimizer_batch_idx = batch.meta_info.get("optimizer_batch_idx", -1)
+        run_update_probe = (
+            global_step == 0
+            and optimizer_batch_idx == 0
+            and callable(getattr(self.worker, "consume_first_update_probe_before", None))
+        )
         is_offload_optimizer_states_in_train_step = batch.meta_info.get("is_offload_optimizer_states_in_train_step", True)
         batch.meta_info['batch_num_tokens'] = self._get_batch_num_tokens(batch, dp_group=mpu.get_data_parallel_group())
         batch.meta_info['global_valid_samples'] = self._get_global_valid_samples(batch, dp_group=mpu.get_data_parallel_group())
@@ -1327,6 +1492,13 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             micro_batch.meta_info['loss_scale'] = num_microbatches * mpu.get_data_parallel_world_size()
             micro_batch.meta_info['micro_batch_size'] = micro_batch.batch.batch_size[0]
 
+        probe_batch = micro_batches_list[0].clone() if run_update_probe and micro_batches_list else None
+        bf16_before = None
+        bf16_before_error = None
+        if probe_batch is not None:
+            bf16_before, bf16_before_error = self._run_logprob_probe(probe_batch, disable_fp8=True)
+            self.model.train()
+
         data_iterator = [iter(micro_batches_list) for _ in range(len(self.model))]
 
         metrics_tensors: List[Dict[str, "torch.Tensor"]] = self.forward_backward_func(
@@ -1346,7 +1518,32 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
 
         # 只有step的时候需要load optimizer states
         self.load_states(include=[OffloadStateType.optimizer_states])
+        learning_rate_applied = None
+        parameter_snapshot = None
+        if run_update_probe:
+            if self.scheduler is not None:
+                learning_rate_applied = float(self.scheduler.get_last_lr()[0])
+            try:
+                parameter_snapshot = snapshot_named_parameters(self.models_unwrapped)
+            except Exception as exc:
+                logger.warning(f"RLVR parameter snapshot failed: {exc}")
         update_successful, grad_norm, num_zeros_in_grad = self.optimizer.step()
+
+        parameter_update = None
+        parameter_update_error = None
+        if run_update_probe and parameter_snapshot is not None:
+            try:
+                local_update = build_parameter_update_statistics(
+                    parameter_snapshot,
+                    self.models_unwrapped,
+                    learning_rate=learning_rate_applied,
+                )
+                parameter_update = self._reduce_parameter_update_statistics(
+                    local_update, learning_rate=learning_rate_applied
+                )
+            except Exception as exc:
+                parameter_update_error = f"{type(exc).__name__}: {exc}"
+                logger.warning(f"RLVR parameter update statistics failed: {exc}")
         if is_offload_optimizer_states_in_train_step:
             self.offload_states(include=[OffloadStateType.optimizer_states], non_blocking=True)
 
@@ -1354,6 +1551,18 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             self.scheduler.step()
         else:
             raise NotImplementedError("megatron optimizer step failed!")
+
+        if probe_batch is not None:
+            self._update_probe_diagnostics = {
+                "parameter_update": parameter_update,
+                "parameter_update_error": parameter_update_error,
+                "logprob_probe": self._build_logprob_probe_diagnostics(
+                    probe_batch=probe_batch,
+                    bf16_before=bf16_before,
+                    bf16_before_error=bf16_before_error,
+                ),
+            }
+            self.model.train()
 
         for model in self.model:
             for bucket_group in model.bucket_groups + model.expert_parallel_bucket_groups:

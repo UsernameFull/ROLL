@@ -51,6 +51,7 @@ from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 from roll.models.model_providers import default_processor_provider, default_tokenizer_provider
 from roll.platforms import current_platform
+from roll.third_party.megatron.attention_mask import build_causal_padding_mask
 from roll.third_party.megatron.compile_warmup import compile_warmup_pipeline_stages
 from roll.third_party.megatron.model_update import MegatronWeightUpdater
 from roll.third_party.megatron.mtp_patcher import patch_mtp_functions
@@ -561,10 +562,7 @@ class MegatronInferStrategy(InferenceStrategy):
             if self.model.config.transformer_impl == "transformer_engine" and not self.model.config.num_moe_experts:
                 attention_mask = None
             elif hasattr(torch, "npu") and torch.npu.is_available() and attention_mask is not None:
-                attention_mask = attention_mask.bool()
-                B, S = attention_mask.shape
-                attention_mask = attention_mask[:, None, None, :]   # [B,1,1,S]
-                attention_mask = attention_mask.expand(B, 1, S, S)        # [B,1,S,S]
+                attention_mask = build_causal_padding_mask(attention_mask)
 
             if labels is not None:
                 labels = self._get_feature_on_this_cp_rank(labels, "labels")

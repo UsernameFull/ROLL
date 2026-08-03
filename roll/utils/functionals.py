@@ -253,7 +253,8 @@ def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str
     if loss_agg_mode == "token-mean":
         if weights is None:
             weights = torch.ones(loss_mask.shape[0], device=loss_mask.device)
-        loss = (loss_mat * weights.unsqueeze(-1)).sum() / batch_num_tokens
+        masked_loss = torch.where(loss_mask.bool(), loss_mat, torch.zeros_like(loss_mat))
+        loss = (masked_loss * weights.unsqueeze(-1)).sum() / batch_num_tokens
     elif loss_agg_mode == "seq-mean-token-sum":
         seq_losses = masked_sum(loss_mat, loss_mask, dim=-1)  # token-sum
         valid_samples = torch.any(loss_mask > 0, dim=-1).float()

@@ -8,10 +8,11 @@ from roll.pipeline.rlvr.logprob_diagnostics import (
     build_ratio_statistics,
     build_token_logprob_records,
     diagnostics_enabled,
+    flatten_diagnostic_payloads,
 )
 
 
-def test_diagnostics_meta_info_keeps_rank_zero_payload():
+def test_diagnostics_meta_info_aggregates_and_flattens_all_ranks():
     rank_zero = DataProto(
         meta_info={
             "metrics": {"loss": 1.0},
@@ -25,16 +26,22 @@ def test_diagnostics_meta_info_keeps_rank_zero_payload():
         }
     )
 
-    merged = DataProto.concat([rank_zero, rank_one])
+    merged = DataProto.concat(
+        [rank_zero, rank_one],
+        global_keys={"metrics", DIAGNOSTICS_META_KEY},
+    )
 
-    assert merged.meta_info[DIAGNOSTICS_META_KEY] == [{"event": "rank_zero"}]
+    diagnostics = flatten_diagnostic_payloads(merged.meta_info[DIAGNOSTICS_META_KEY])
+
+    assert diagnostics == [{"event": "rank_zero"}, {"event": "rank_one"}]
     assert merged.meta_info["metrics"]["loss"] == [1.0, 2.0]
 
 
-def test_diagnostics_enabled_only_for_first_step_rank_zero():
+def test_diagnostics_enabled_for_all_ranks_only_on_first_step():
     assert diagnostics_enabled(global_step=0, rank=0)
+    assert diagnostics_enabled(global_step=0, rank=1)
     assert not diagnostics_enabled(global_step=1, rank=0)
-    assert not diagnostics_enabled(global_step=0, rank=1)
+    assert not diagnostics_enabled(global_step=1, rank=1)
 
 
 def test_build_ratio_statistics_masks_and_reports_quantiles():
@@ -49,6 +56,18 @@ def test_build_ratio_statistics_masks_and_reports_quantiles():
     assert stats["ratio_median"] == 2.0
     assert stats["ratio_min"] == 1.0
     assert stats["ratio_max"] == 3.0
+
+
+def test_first_optimizer_batch_ratio_statistics_are_one():
+    ratio = torch.ones((2, 4))
+    response_mask = torch.tensor([[1, 1, 0, 0], [1, 1, 1, 0]])
+
+    stats = build_ratio_statistics(ratio, response_mask)
+
+    assert stats["ratio_mean"] == 1.0
+    assert stats["ratio_min"] == 1.0
+    assert stats["ratio_median"] == 1.0
+    assert stats["ratio_max"] == 1.0
 
 
 def test_build_token_logprob_records_is_bounded_and_aligned():

@@ -150,6 +150,7 @@ class ActorWorker(BaseActorWorker):
                 self._driver_logprob_diagnostics.append(
                     {
                         "event": "first_optimizer_batch_token_logprobs",
+                        "rank": self.rank,
                         "global_step": global_step,
                         "optimizer_batch_idx": optimizer_batch_idx,
                         "records": records,
@@ -244,9 +245,10 @@ class ActorWorker(BaseActorWorker):
 
             payload = {
                 "event": "optimizer_batch_complete",
+                "rank": self.rank,
                 "global_step": global_step,
                 "optimizer_batch_idx": batch_idx,
-                "ratio_mean": metric("actor/ratio_mean@sum"),
+                "ratio_mean": metric(f"{PRIVATE_METRIC_PREFIX}ratio_mean"),
                 "ratio_min": metric("actor/ratio_min@min"),
                 "ratio_max": metric("actor/ratio_max@max"),
                 "ratio_p01_microbatch_mean": metric(f"{PRIVATE_METRIC_PREFIX}ratio_p01"),

@@ -10,8 +10,19 @@ PRIVATE_METRIC_PREFIX = "_rlvr_logprob_diag/"
 
 
 def diagnostics_enabled(global_step: int, rank: int) -> bool:
-    """Return whether the fixed first-step diagnostic should run."""
-    return global_step == 0 and rank == 0
+    """Return whether the fixed first-step diagnostic should run on this rank."""
+    return global_step == 0
+
+
+def flatten_diagnostic_payloads(payloads: List[object]) -> List[Dict[str, object]]:
+    """Flatten per-rank diagnostic lists produced by ``DataProto.concat``."""
+    flattened: List[Dict[str, object]] = []
+    for payload in payloads:
+        if isinstance(payload, list):
+            flattened.extend(flatten_diagnostic_payloads(payload))
+        elif isinstance(payload, dict):
+            flattened.append(payload)
+    return flattened
 
 
 def build_ratio_statistics(ratio: torch.Tensor, response_mask: torch.Tensor) -> Dict[str, float]:

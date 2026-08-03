@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from roll.utils.functionals import traverse_obj, divide_by_chunk_size, pad_to_length
+from roll.utils.functionals import agg_loss, divide_by_chunk_size, pad_to_length, traverse_obj
 
 
 def visitor(obj: object, path: Tuple):
@@ -53,6 +53,30 @@ def test_pad_to_length():
 
     padded_tensor = pad_to_length(tensor, length, pad_value, dim=-1)
     print(padded_tensor)
+
+
+def test_agg_loss_token_mean_excludes_masked_values():
+    loss_mat = torch.tensor([[1.0, 100.0], [3.0, 200.0]])
+    loss_mask = torch.tensor([[1, 0], [1, 0]])
+
+    loss = agg_loss(loss_mat, loss_mask, loss_agg_mode="token-mean")
+
+    assert loss.item() == pytest.approx(2.0)
+
+
+def test_agg_loss_token_mean_applies_sample_weights_after_masking():
+    loss_mat = torch.tensor([[1.0, 100.0], [3.0, 200.0]])
+    loss_mask = torch.tensor([[1, 0], [1, 0]])
+    weights = torch.tensor([2.0, 0.5])
+
+    loss = agg_loss(
+        loss_mat,
+        loss_mask,
+        loss_agg_mode="token-mean",
+        weights=weights,
+    )
+
+    assert loss.item() == pytest.approx(1.75)
 
 
 if __name__ == "__main__":

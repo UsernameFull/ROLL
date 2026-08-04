@@ -226,8 +226,6 @@ class VllmStrategy(InferenceStrategy):
             if self._infer_diagnostic_requests_remaining <= 0:
                 return False
             self._infer_diagnostic_requests_remaining -= 1
-            if self._infer_diagnostic_requests_remaining == 0:
-                self._infer_diagnostics_configured = False
             return True
 
     async def _score_teacher_forced_completion(

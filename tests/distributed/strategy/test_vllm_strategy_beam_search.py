@@ -206,6 +206,7 @@ class TestVllmStrategyBeamSearch:
 
     def test_infer_diagnostic_claim_is_bounded(self, vllm_strategy):
         vllm_strategy._infer_diagnostic_requests_remaining = 1
+        vllm_strategy._infer_diagnostics_configured = True
         vllm_strategy._infer_diagnostic_claim_lock = asyncio.Lock()
 
         async def claim_twice():
@@ -215,6 +216,7 @@ class TestVllmStrategyBeamSearch:
             )
 
         assert asyncio.run(claim_twice()) == [True, False]
+        assert vllm_strategy._infer_diagnostics_configured is True
 
     def test_score_teacher_forced_completion_returns_completion_span(self, vllm_strategy):
         async def mock_generate(prompt, sampling_params, request_id, lora_request):

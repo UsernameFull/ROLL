@@ -69,9 +69,11 @@ from roll.third_party.megatron.router_replay_utils import (
 )
 from roll.third_party.megatron.tensor_parallel import vocab_parallel_entropy
 from roll.third_party.megatron.update_diagnostics import (
-    build_logprob_repeatability_statistics,
+    build_logprob_interpolation_statistics,
     build_masked_logprob_delta_statistics,
     build_parameter_update_statistics,
+    copy_parameter_snapshot_to_models,
+    interpolate_parameter_snapshots_to_models,
     snapshot_named_parameters,
 )
 from roll.third_party.megatron.util import unwrap_model
@@ -1398,50 +1400,77 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             "top_parameters_local": local_statistics["top_parameters"],
         }
 
-    def _build_no_step_repeatability_diagnostics(self, probe_batch: DataProto) -> dict:
-        """Repeat fixed-parameter BF16/native forwards without an optimizer step."""
-        models = self.model.get_models()
-        training_modes = [model.training for model in models]
+    def _build_parameter_interpolation_diagnostics(
+        self,
+        probe_batch: DataProto,
+        parameter_before: dict[str, torch.Tensor],
+        parameter_after: dict[str, torch.Tensor],
+    ) -> dict:
+        """Probe BF16/native logprobs along the first optimizer update path."""
+        alphas = (0.0, 0.25, 0.5, 0.75, 1.0)
+        forward_models = self.model.get_models()
+        training_modes = [model.training for model in forward_models]
         bf16_runs = []
         native_runs = []
-        probe_errors = {}
+        parameter_progress = []
+        probe_errors = []
+        restore_completed = False
         try:
-            for model in models:
+            for model in forward_models:
                 model.eval()
 
-            for run_index in range(2):
-                result, error = self._run_logprob_probe(probe_batch, disable_fp8=True)
-                bf16_runs.append(result)
-                probe_errors[f"bf16_run_{run_index + 1}"] = error
-
-            for run_index in range(3):
-                result, error = self._run_logprob_probe(probe_batch, disable_fp8=False)
-                native_runs.append(result)
-                probe_errors[f"native_run_{run_index + 1}"] = error
+            for alpha in alphas:
+                progress = interpolate_parameter_snapshots_to_models(
+                    before=parameter_before,
+                    after=parameter_after,
+                    models=self.models_unwrapped,
+                    alpha=alpha,
+                )
+                bf16_log_probs, bf16_error = self._run_logprob_probe(probe_batch, disable_fp8=True)
+                native_log_probs, native_error = self._run_logprob_probe(probe_batch, disable_fp8=False)
+                parameter_progress.append(progress)
+                bf16_runs.append(bf16_log_probs)
+                native_runs.append(native_log_probs)
+                probe_errors.append(
+                    {
+                        "alpha": alpha,
+                        "bf16_error": bf16_error,
+                        "native_error": native_error,
+                    }
+                )
         finally:
-            for model, training in zip(models, training_modes):
-                model.train(training)
+            try:
+                copy_parameter_snapshot_to_models(parameter_after, self.models_unwrapped)
+                restore_completed = True
+            finally:
+                for model, training in zip(forward_models, training_modes):
+                    model.train(training)
 
         diagnostics = {
-            "parameter_state": "post_optimizer_step",
+            "alphas": list(alphas),
+            "parameter_path": "before_plus_alpha_times_optimizer_update",
+            "parameter_progress_scope": "local_model_shard",
             "model_mode": "eval",
-            "optimizer_step_between_repeats": False,
+            "optimizer_step_between_points": False,
             "native_precision": "fp8" if getattr(self.model.config, "fp8", None) else "bf16",
             "native_probe_may_update_fp8_metadata": bool(getattr(self.model.config, "fp8", None)),
+            "restore_completed": restore_completed,
             "probe_errors": probe_errors,
         }
         probe_mask = probe_batch.batch["response_mask"][:, 1:].detach().to(device="cpu", dtype=torch.bool)
         try:
-            diagnostics.update(
-                build_logprob_repeatability_statistics(
-                    bf16_runs=bf16_runs,
-                    native_runs=native_runs,
-                    mask=probe_mask,
-                )
+            points = build_logprob_interpolation_statistics(
+                alphas=alphas,
+                bf16_runs=bf16_runs,
+                native_runs=native_runs,
+                mask=probe_mask,
             )
+            for point, progress in zip(points, parameter_progress):
+                point["parameter_progress"] = progress
+            diagnostics["points"] = points
         except Exception as exc:
             diagnostics["statistics_error"] = f"{type(exc).__name__}: {exc}"
-            logger.warning(f"RLVR no-step repeatability statistics failed: {exc}")
+            logger.warning(f"RLVR parameter interpolation statistics failed: {exc}")
         return diagnostics
 
     def _build_logprob_probe_diagnostics(
@@ -1449,6 +1478,9 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         probe_batch: DataProto,
         bf16_before: torch.Tensor | None,
         bf16_before_error: str | None,
+        parameter_before: dict[str, torch.Tensor] | None,
+        parameter_after: dict[str, torch.Tensor] | None,
+        parameter_interpolation_error: str | None,
     ) -> dict:
         """Compare pre/post-update native and BF16-shadow logprobs."""
         native_before = None
@@ -1491,11 +1523,16 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         except Exception as exc:
             diagnostics["statistics_error"] = f"{type(exc).__name__}: {exc}"
             logger.warning(f"RLVR post-update logprob statistics failed: {exc}")
-        try:
-            diagnostics["repeatability"] = self._build_no_step_repeatability_diagnostics(probe_batch)
-        except Exception as exc:
-            diagnostics["repeatability_error"] = f"{type(exc).__name__}: {exc}"
-            logger.warning(f"RLVR no-step repeatability probe failed: {exc}")
+        if parameter_before is not None and parameter_after is not None:
+            diagnostics["parameter_interpolation"] = self._build_parameter_interpolation_diagnostics(
+                probe_batch=probe_batch,
+                parameter_before=parameter_before,
+                parameter_after=parameter_after,
+            )
+        else:
+            diagnostics["parameter_interpolation_error"] = (
+                parameter_interpolation_error or "parameter snapshots are unavailable"
+            )
         return diagnostics
 
     def train_step(self, batch: DataProto, loss_func: Callable):
@@ -1572,17 +1609,21 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         self.load_states(include=[OffloadStateType.optimizer_states])
         learning_rate_applied = None
         parameter_snapshot = None
+        parameter_snapshot_error = None
         if run_update_probe:
             if self.scheduler is not None:
                 learning_rate_applied = float(self.scheduler.get_last_lr()[0])
             try:
                 parameter_snapshot = snapshot_named_parameters(self.models_unwrapped)
             except Exception as exc:
+                parameter_snapshot_error = f"{type(exc).__name__}: {exc}"
                 logger.warning(f"RLVR parameter snapshot failed: {exc}")
         update_successful, grad_norm, num_zeros_in_grad = self.optimizer.step()
 
         parameter_update = None
-        parameter_update_error = None
+        parameter_update_error = parameter_snapshot_error
+        parameter_after_snapshot = None
+        parameter_after_snapshot_error = None
         if run_update_probe and parameter_snapshot is not None:
             try:
                 local_update = build_parameter_update_statistics(
@@ -1596,6 +1637,11 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             except Exception as exc:
                 parameter_update_error = f"{type(exc).__name__}: {exc}"
                 logger.warning(f"RLVR parameter update statistics failed: {exc}")
+            try:
+                parameter_after_snapshot = snapshot_named_parameters(self.models_unwrapped)
+            except Exception as exc:
+                parameter_after_snapshot_error = f"{type(exc).__name__}: {exc}"
+                logger.warning(f"RLVR post-update parameter snapshot failed: {exc}")
         if is_offload_optimizer_states_in_train_step:
             self.offload_states(include=[OffloadStateType.optimizer_states], non_blocking=True)
 
@@ -1612,6 +1658,9 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                     probe_batch=probe_batch,
                     bf16_before=bf16_before,
                     bf16_before_error=bf16_before_error,
+                    parameter_before=parameter_snapshot,
+                    parameter_after=parameter_after_snapshot,
+                    parameter_interpolation_error=parameter_snapshot_error or parameter_after_snapshot_error,
                 ),
             }
             self.model.train()

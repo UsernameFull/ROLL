@@ -140,29 +140,129 @@ def build_masked_logprob_delta_statistics(
     }
 
 
-def build_logprob_repeatability_statistics(
+def interpolate_parameter_snapshots_to_models(
     *,
+    before: Mapping[str, torch.Tensor],
+    after: Mapping[str, torch.Tensor],
+    models: nn.Module | Iterable[nn.Module],
+    alpha: float,
+) -> dict[str, float | int | None]:
+    """Load ``before + alpha * (after - before)`` into model forward parameters.
+
+    Interpolation is computed in FP32 on CPU and then rounded to each model
+    parameter's dtype. Returned progress statistics expose any loss of requested
+    interpolation resolution caused by BF16 parameter rounding.
+    """
+    if not math.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
+        raise ValueError(f"alpha must be finite and in [0, 1], got {alpha}")
+
+    named_parameters = list(_iter_named_parameters(models))
+    _validate_parameter_snapshot(before, named_parameters, label="before")
+    _validate_parameter_snapshot(after, named_parameters, label="after")
+
+    full_delta_sq_sum = 0.0
+    realized_delta_sq_sum = 0.0
+    realized_full_dot_sum = 0.0
+    changed_numel = 0
+    numel = 0
+    with torch.no_grad():
+        for name, parameter in named_parameters:
+            before_float = before[name].to(dtype=torch.float32)
+            after_float = after[name].to(dtype=torch.float32)
+            full_delta = after_float - before_float
+            if alpha == 0.0:
+                interpolated = before[name]
+            elif alpha == 1.0:
+                interpolated = after[name]
+            else:
+                interpolated = torch.lerp(before_float, after_float, alpha).to(dtype=parameter.dtype)
+
+            realized_float = interpolated.to(dtype=torch.float32)
+            realized_delta = realized_float - before_float
+            full_delta_sq_sum += float(full_delta.square().sum().item())
+            realized_delta_sq_sum += float(realized_delta.square().sum().item())
+            realized_full_dot_sum += float((realized_delta * full_delta).sum().item())
+            changed_numel += int((realized_delta != 0).sum().item())
+            numel += parameter.numel()
+            parameter.copy_(interpolated.to(device=parameter.device, dtype=parameter.dtype))
+
+    full_update_norm = math.sqrt(full_delta_sq_sum)
+    realized_update_norm = math.sqrt(realized_delta_sq_sum)
+    return {
+        "requested_alpha": float(alpha),
+        "full_update_norm": full_update_norm,
+        "realized_update_norm": realized_update_norm,
+        "realized_update_norm_ratio": _safe_divide(realized_update_norm, full_update_norm),
+        "realized_alpha_projection": _safe_divide(realized_full_dot_sum, full_delta_sq_sum),
+        "realized_changed_fraction": _safe_divide(float(changed_numel), float(numel)),
+    }
+
+
+def copy_parameter_snapshot_to_models(
+    snapshot: Mapping[str, torch.Tensor], models: nn.Module | Iterable[nn.Module]
+) -> None:
+    """Restore a validated CPU parameter snapshot to model forward parameters."""
+    named_parameters = list(_iter_named_parameters(models))
+    _validate_parameter_snapshot(snapshot, named_parameters, label="restore")
+    with torch.no_grad():
+        for name, parameter in named_parameters:
+            parameter.copy_(snapshot[name].to(device=parameter.device, dtype=parameter.dtype))
+
+
+def build_logprob_interpolation_statistics(
+    *,
+    alphas: Sequence[float],
     bf16_runs: Sequence[torch.Tensor | None],
     native_runs: Sequence[torch.Tensor | None],
     mask: torch.Tensor,
-) -> dict[str, DiagnosticStatistics]:
-    """Compare repeated BF16/native forwards executed at fixed parameters."""
-    if len(bf16_runs) != 2:
-        raise ValueError(f"Expected exactly 2 BF16 runs, got {len(bf16_runs)}")
-    if len(native_runs) != 3:
-        raise ValueError(f"Expected exactly 3 native runs, got {len(native_runs)}")
+) -> list[dict[str, object]]:
+    """Compare BF16/native logprobs along one parameter-update interpolation path."""
+    if not alphas:
+        raise ValueError("At least one interpolation alpha is required")
+    if len(bf16_runs) != len(alphas) or len(native_runs) != len(alphas):
+        raise ValueError(
+            "Interpolation run counts must match alphas: "
+            f"alphas={len(alphas)}, bf16={len(bf16_runs)}, native={len(native_runs)}"
+        )
+    if alphas[0] != 0.0:
+        raise ValueError(f"The first interpolation alpha must be 0.0, got {alphas[0]}")
+    if any(not math.isfinite(alpha) or not 0.0 <= alpha <= 1.0 for alpha in alphas):
+        raise ValueError(f"Interpolation alphas must be finite and in [0, 1], got {list(alphas)}")
+    if any(current <= previous for previous, current in zip(alphas, alphas[1:])):
+        raise ValueError(f"Interpolation alphas must be strictly increasing, got {list(alphas)}")
 
-    comparisons = {
-        "bf16_repeat_2_vs_1": (bf16_runs[1], bf16_runs[0]),
-        "native_repeat_2_vs_1": (native_runs[1], native_runs[0]),
-        "native_repeat_3_vs_2": (native_runs[2], native_runs[1]),
-        "bf16_vs_native_first": (bf16_runs[0], native_runs[0]),
-    }
-    return {
-        name: build_masked_logprob_delta_statistics(after, before, mask)
-        for name, (after, before) in comparisons.items()
-        if after is not None and before is not None
-    }
+    points: list[dict[str, object]] = []
+    bf16_baseline = bf16_runs[0]
+    native_baseline = native_runs[0]
+    for index, alpha in enumerate(alphas):
+        bf16_current = bf16_runs[index]
+        native_current = native_runs[index]
+        point: dict[str, object] = {"alpha": float(alpha)}
+        if bf16_current is not None and bf16_baseline is not None:
+            point["bf16_from_alpha_0"] = build_masked_logprob_delta_statistics(
+                bf16_current, bf16_baseline, mask
+            )
+        if native_current is not None and native_baseline is not None:
+            point["native_from_alpha_0"] = build_masked_logprob_delta_statistics(
+                native_current, native_baseline, mask
+            )
+        if bf16_current is not None and native_current is not None:
+            point["bf16_vs_native"] = build_masked_logprob_delta_statistics(
+                bf16_current, native_current, mask
+            )
+        if index > 0:
+            bf16_previous = bf16_runs[index - 1]
+            native_previous = native_runs[index - 1]
+            if bf16_current is not None and bf16_previous is not None:
+                point["bf16_from_previous"] = build_masked_logprob_delta_statistics(
+                    bf16_current, bf16_previous, mask
+                )
+            if native_current is not None and native_previous is not None:
+                point["native_from_previous"] = build_masked_logprob_delta_statistics(
+                    native_current, native_previous, mask
+                )
+        points.append(point)
+    return points
 
 
 def _iter_named_parameters(models: nn.Module | Iterable[nn.Module]) -> Iterator[tuple[str, nn.Parameter]]:
@@ -174,6 +274,29 @@ def _iter_named_parameters(models: nn.Module | Iterable[nn.Module]) -> Iterator[
             if not parameter.requires_grad:
                 continue
             yield f"model{model_index}.{name}", parameter
+
+
+def _validate_parameter_snapshot(
+    snapshot: Mapping[str, torch.Tensor],
+    named_parameters: Sequence[tuple[str, nn.Parameter]],
+    *,
+    label: str,
+) -> None:
+    current_names = {name for name, _ in named_parameters}
+    snapshot_names = set(snapshot)
+    if current_names != snapshot_names:
+        missing = sorted(current_names - snapshot_names)[:3]
+        extra = sorted(snapshot_names - current_names)[:3]
+        raise ValueError(f"{label} snapshot names differ from model: missing={missing}, extra={extra}")
+    for name, parameter in named_parameters:
+        value = snapshot[name]
+        if value.device.type != "cpu":
+            raise ValueError(f"{label} snapshot parameter must be on CPU: {name}")
+        if value.shape != parameter.shape:
+            raise ValueError(
+                f"{label} snapshot shape differs for {name}: "
+                f"snapshot={tuple(value.shape)}, model={tuple(parameter.shape)}"
+            )
 
 
 def _cpu_clone(tensor: torch.Tensor) -> torch.Tensor:

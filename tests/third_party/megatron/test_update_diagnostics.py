@@ -5,9 +5,11 @@ import torch
 from torch import nn
 
 from roll.third_party.megatron.update_diagnostics import (
-    build_logprob_repeatability_statistics,
+    build_logprob_interpolation_statistics,
     build_masked_logprob_delta_statistics,
     build_parameter_update_statistics,
+    copy_parameter_snapshot_to_models,
+    interpolate_parameter_snapshots_to_models,
     snapshot_named_parameters,
 )
 
@@ -135,53 +137,121 @@ def test_build_masked_logprob_delta_statistics_rejects_shape_mismatch():
         build_masked_logprob_delta_statistics(torch.ones(2), torch.ones(2), torch.ones(1))
 
 
-def test_build_logprob_repeatability_statistics_compares_fixed_run_pairs():
-    mask = torch.tensor([[True, True, False]])
-    bf16_runs = [torch.zeros(1, 3), torch.tensor([[0.1, -0.1, 9.0]])]
-    native_runs = [
-        torch.tensor([[0.2, 0.2, 9.0]]),
-        torch.tensor([[0.4, 0.0, 9.0]]),
-        torch.tensor([[0.7, -0.3, 9.0]]),
-    ]
+def test_interpolate_and_restore_parameter_snapshots():
+    model = nn.Linear(2, 1, bias=False)
+    with torch.no_grad():
+        model.weight.copy_(torch.tensor([[0.0, 2.0]]))
+    before = snapshot_named_parameters(model)
+    with torch.no_grad():
+        model.weight.copy_(torch.tensor([[4.0, 6.0]]))
+    after = snapshot_named_parameters(model)
 
-    stats = build_logprob_repeatability_statistics(
+    progress = interpolate_parameter_snapshots_to_models(
+        before=before,
+        after=after,
+        models=model,
+        alpha=0.25,
+    )
+
+    assert torch.equal(model.weight, torch.tensor([[1.0, 3.0]]))
+    assert progress["requested_alpha"] == 0.25
+    assert progress["realized_update_norm_ratio"] == pytest.approx(0.25)
+    assert progress["realized_alpha_projection"] == pytest.approx(0.25)
+    copy_parameter_snapshot_to_models(after, model)
+    assert torch.equal(model.weight, torch.tensor([[4.0, 6.0]]))
+
+
+def test_interpolate_parameter_snapshots_validates_before_mutating():
+    model = nn.Linear(1, 1, bias=False)
+    original = model.weight.detach().clone()
+    snapshot = snapshot_named_parameters(model)
+
+    with pytest.raises(ValueError, match="alpha"):
+        interpolate_parameter_snapshots_to_models(
+            before=snapshot,
+            after=snapshot,
+            models=model,
+            alpha=math.nan,
+        )
+    assert torch.equal(model.weight, original)
+
+    with pytest.raises(ValueError, match="names differ"):
+        interpolate_parameter_snapshots_to_models(
+            before={},
+            after=snapshot,
+            models=model,
+            alpha=0.5,
+        )
+    assert torch.equal(model.weight, original)
+
+
+def test_interpolate_parameter_snapshots_reports_bf16_rounding_progress():
+    model = nn.Linear(1, 1, bias=False, dtype=torch.bfloat16)
+    with torch.no_grad():
+        model.weight.fill_(1.0)
+    before = snapshot_named_parameters(model)
+    with torch.no_grad():
+        model.weight.fill_(1.0078125)
+    after = snapshot_named_parameters(model)
+
+    progress = interpolate_parameter_snapshots_to_models(
+        before=before,
+        after=after,
+        models=model,
+        alpha=0.25,
+    )
+
+    assert model.weight.item() == 1.0
+    assert progress["requested_alpha"] == 0.25
+    assert progress["realized_update_norm_ratio"] == 0.0
+    assert progress["realized_alpha_projection"] == 0.0
+
+
+def test_build_logprob_interpolation_statistics_returns_path_deltas():
+    mask = torch.tensor([[True, True]])
+    alphas = [0.0, 0.5, 1.0]
+    bf16_runs = [torch.zeros(1, 2), torch.full((1, 2), 0.1), torch.full((1, 2), 0.2)]
+    native_runs = [torch.full((1, 2), 0.2), torch.full((1, 2), 0.4), torch.full((1, 2), 0.8)]
+
+    points = build_logprob_interpolation_statistics(
+        alphas=alphas,
         bf16_runs=bf16_runs,
         native_runs=native_runs,
         mask=mask,
     )
 
-    assert set(stats) == {
-        "bf16_repeat_2_vs_1",
-        "native_repeat_2_vs_1",
-        "native_repeat_3_vs_2",
-        "bf16_vs_native_first",
-    }
-    assert stats["bf16_repeat_2_vs_1"]["delta_rms"] == pytest.approx(0.1)
-    assert stats["native_repeat_2_vs_1"]["delta_rms"] == pytest.approx(0.2)
-    assert stats["native_repeat_3_vs_2"]["delta_rms"] == pytest.approx(0.3)
-    assert stats["bf16_vs_native_first"]["delta_mean"] == pytest.approx(-0.2)
+    assert [point["alpha"] for point in points] == alphas
+    assert points[0]["bf16_from_alpha_0"]["delta_rms"] == 0.0
+    assert points[1]["bf16_from_alpha_0"]["delta_rms"] == pytest.approx(0.1)
+    assert points[2]["native_from_alpha_0"]["delta_rms"] == pytest.approx(0.6)
+    assert points[2]["native_from_previous"]["delta_rms"] == pytest.approx(0.4)
+    assert points[2]["bf16_vs_native"]["delta_mean"] == pytest.approx(-0.6)
 
 
-def test_build_logprob_repeatability_statistics_skips_unavailable_pipeline_outputs():
-    stats = build_logprob_repeatability_statistics(
+def test_build_logprob_interpolation_statistics_skips_unavailable_pipeline_outputs():
+    points = build_logprob_interpolation_statistics(
+        alphas=[0.0, 1.0],
         bf16_runs=[None, None],
-        native_runs=[torch.zeros(1, 1), torch.ones(1, 1), None],
+        native_runs=[torch.zeros(1, 1), torch.ones(1, 1)],
         mask=torch.ones(1, 1, dtype=torch.bool),
     )
 
-    assert set(stats) == {"native_repeat_2_vs_1"}
+    assert set(points[1]) == {"alpha", "native_from_alpha_0", "native_from_previous"}
 
 
 @pytest.mark.parametrize(
-    ("bf16_runs", "native_runs", "message"),
+    ("alphas", "bf16_runs", "native_runs", "message"),
     [
-        ([torch.zeros(1)], [torch.zeros(1)] * 3, "2 BF16"),
-        ([torch.zeros(1)] * 2, [torch.zeros(1)] * 2, "3 native"),
+        ([], [], [], "At least one"),
+        ([0.0, 1.0], [torch.zeros(1)], [torch.zeros(1)] * 2, "run counts"),
+        ([0.25, 1.0], [torch.zeros(1)] * 2, [torch.zeros(1)] * 2, "first"),
+        ([0.0, 0.0], [torch.zeros(1)] * 2, [torch.zeros(1)] * 2, "increasing"),
     ],
 )
-def test_build_logprob_repeatability_statistics_validates_run_counts(bf16_runs, native_runs, message):
+def test_build_logprob_interpolation_statistics_validates_path(alphas, bf16_runs, native_runs, message):
     with pytest.raises(ValueError, match=message):
-        build_logprob_repeatability_statistics(
+        build_logprob_interpolation_statistics(
+            alphas=alphas,
             bf16_runs=bf16_runs,
             native_runs=native_runs,
             mask=torch.ones(1, dtype=torch.bool),

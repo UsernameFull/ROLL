@@ -5,13 +5,42 @@ import torch
 from torch import nn
 
 from roll.third_party.megatron.update_diagnostics import (
+    LayerActivationCapture,
+    build_activation_delta_statistics,
+    build_layerwise_activation_statistics,
     build_logprob_interpolation_statistics,
     build_masked_logprob_delta_statistics,
     build_parameter_update_statistics,
     copy_parameter_snapshot_to_models,
+    extract_first_tensor,
     interpolate_parameter_snapshots_to_models,
+    sample_tensor_values,
     snapshot_named_parameters,
 )
+
+
+class TransformerLayer(nn.Module):
+    def __init__(self, layer_number: int, scale: float = 1.0):
+        super().__init__()
+        self.layer_number = layer_number
+        self.scale = scale
+
+    def forward(self, inputs):
+        return inputs * self.scale, None
+
+
+class TinyTransformer(nn.Module):
+    def __init__(self, scales=(1.0,)):
+        super().__init__()
+        self.layers = nn.ModuleList(
+            TransformerLayer(layer_number=index + 1, scale=scale) for index, scale in enumerate(scales)
+        )
+
+    def forward(self, inputs):
+        hidden_states = inputs
+        for layer in self.layers:
+            hidden_states, _ = layer(hidden_states)
+        return hidden_states
 
 
 def test_snapshot_named_parameters_clones_multiple_models_to_cpu():
@@ -135,6 +164,111 @@ def test_build_masked_logprob_delta_statistics_handles_empty_mask_and_nonfinite_
 def test_build_masked_logprob_delta_statistics_rejects_shape_mismatch():
     with pytest.raises(ValueError, match="Mask shape"):
         build_masked_logprob_delta_statistics(torch.ones(2), torch.ones(2), torch.ones(1))
+
+
+def test_extract_first_tensor_supports_transformer_layer_outputs():
+    expected = torch.ones(2)
+
+    assert extract_first_tensor(expected) is expected
+    assert extract_first_tensor((None, [expected])) is expected
+    assert extract_first_tensor({"hidden_states": expected}) is None
+
+
+def test_sample_tensor_values_is_deterministic_and_bounded():
+    tensor = torch.arange(10, dtype=torch.bfloat16).reshape(2, 5)
+
+    sampled = sample_tensor_values(tensor, max_samples=4)
+
+    assert sampled.device.type == "cpu"
+    assert sampled.dtype == torch.float32
+    assert torch.equal(sampled, torch.tensor([0.0, 3.0, 6.0, 9.0]))
+    with pytest.raises(ValueError, match="positive"):
+        sample_tensor_values(tensor, max_samples=0)
+
+
+def test_build_activation_delta_statistics_returns_relative_error_and_cosine():
+    bf16 = torch.tensor([1.0, 2.0, 3.0])
+    native = torch.tensor([2.0, 2.0, 4.0])
+
+    stats = build_activation_delta_statistics(bf16, native)
+
+    assert stats["sample_count"] == 3
+    assert stats["finite_pair_count"] == 3
+    assert stats["delta_rms"] == pytest.approx(math.sqrt(2 / 3))
+    assert stats["relative_rms"] == pytest.approx(math.sqrt(2 / 14))
+    assert stats["cosine_similarity"] == pytest.approx(18 / math.sqrt(14 * 24))
+    assert stats["delta_abs_p95"] == pytest.approx(1.0)
+
+
+def test_build_activation_delta_statistics_handles_zero_and_nonfinite_values():
+    identical_zero = build_activation_delta_statistics(torch.zeros(2), torch.zeros(2))
+    assert identical_zero["relative_rms"] == 0.0
+    assert identical_zero["cosine_similarity"] == 1.0
+
+    stats = build_activation_delta_statistics(
+        torch.tensor([0.0, math.inf, math.nan]),
+        torch.tensor([1.0, 0.0, math.nan]),
+    )
+    assert stats["sample_count"] == 3
+    assert stats["finite_pair_count"] == 1
+    assert stats["nonfinite_pair_count"] == 2
+    assert stats["relative_rms"] is None
+    assert stats["cosine_similarity"] is None
+
+
+def test_layer_activation_capture_discovers_layers_samples_outputs_and_removes_hooks():
+    model = TinyTransformer(scales=(2.0, 3.0))
+    capture = LayerActivationCapture(model, max_samples_per_layer=4)
+
+    with capture:
+        model(torch.arange(6, dtype=torch.float32))
+
+    records = capture.snapshot()
+    assert list(records) == ["model0.layers.0", "model0.layers.1"]
+    assert records["model0.layers.0"]["layer_number"] == 1
+    assert records["model0.layers.0"]["call_count"] == 1
+    assert records["model0.layers.0"]["original_numel"] == 6
+    assert records["model0.layers.0"]["sample"].numel() <= 4
+    assert not model.layers[0]._forward_hooks
+    assert not model.layers[1]._forward_hooks
+
+
+def test_layer_activation_capture_removes_hooks_after_exception():
+    model = TinyTransformer()
+    capture = LayerActivationCapture(model)
+
+    with pytest.raises(RuntimeError, match="probe failed"):
+        with capture:
+            raise RuntimeError("probe failed")
+
+    assert not model.layers[0]._forward_hooks
+
+
+def test_build_layerwise_activation_statistics_orders_and_reports_unmatched_layers():
+    bf16_model = TinyTransformer(scales=(1.0, 1.0))
+    native_model = TinyTransformer(scales=(1.0, 2.0))
+    bf16_capture = LayerActivationCapture(bf16_model, max_samples_per_layer=8)
+    native_capture = LayerActivationCapture(native_model, max_samples_per_layer=8)
+    inputs = torch.arange(4, dtype=torch.float32)
+    with bf16_capture:
+        bf16_model(inputs)
+    with native_capture:
+        native_model(inputs)
+
+    native_records = native_capture.snapshot()
+    unmatched = native_records.pop("model0.layers.1")
+    native_records["model0.extra_layer"] = unmatched
+    result = build_layerwise_activation_statistics(
+        bf16_capture.snapshot(),
+        native_records,
+        max_samples_per_layer=8,
+    )
+
+    assert result["matched_layer_count"] == 1
+    assert result["layers"][0]["key"] == "model0.layers.0"
+    assert result["layers"][0]["delta_rms"] == 0.0
+    assert result["unmatched_bf16_layers"] == ["model0.layers.1"]
+    assert result["unmatched_native_layers"] == ["model0.extra_layer"]
 
 
 def test_interpolate_and_restore_parameter_snapshots():

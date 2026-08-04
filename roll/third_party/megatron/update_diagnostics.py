@@ -1,4 +1,4 @@
-"""CPU-only helpers for diagnosing optimizer updates and log-probability drift."""
+"""Helpers for diagnosing optimizer updates and numerical forward drift."""
 
 import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -11,6 +11,92 @@ from torch import nn
 ParameterSnapshot: TypeAlias = dict[str, torch.Tensor]
 DiagnosticValue: TypeAlias = float | int | None | str | list[dict[str, object]]
 DiagnosticStatistics: TypeAlias = dict[str, DiagnosticValue]
+
+
+class LayerActivationCapture:
+    """Temporarily capture bounded Transformer-layer output samples."""
+
+    def __init__(
+        self,
+        models: nn.Module | Iterable[nn.Module],
+        *,
+        max_samples_per_layer: int = 65_536,
+    ) -> None:
+        if max_samples_per_layer <= 0:
+            raise ValueError(
+                f"max_samples_per_layer must be positive, got {max_samples_per_layer}"
+            )
+        self.max_samples_per_layer = max_samples_per_layer
+        self._layers = list(_iter_transformer_layers(models))
+        self._records = {
+            key: {
+                **metadata,
+                "call_count": 0,
+                "original_numel": 0,
+                "shapes": [],
+                "samples": [],
+                "capture_errors": [],
+            }
+            for key, _module, metadata in self._layers
+        }
+        self._handles = []
+        self._active = False
+
+    def __enter__(self) -> "LayerActivationCapture":
+        if self._active:
+            raise RuntimeError("LayerActivationCapture is already active")
+        self._active = True
+        try:
+            for key, module, _metadata in self._layers:
+                self._handles.append(module.register_forward_hook(self._make_hook(key)))
+        except Exception:
+            self._remove_hooks()
+            raise
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        self._remove_hooks()
+        return False
+
+    def snapshot(self) -> dict[str, dict[str, object]]:
+        """Return detached CPU samples and JSON-safe capture metadata."""
+        result = {}
+        for key, record in self._records.items():
+            samples = record["samples"]
+            sample = torch.cat(samples) if samples else torch.empty(0, dtype=torch.float32)
+            result[key] = {
+                name: value
+                for name, value in record.items()
+                if name != "samples"
+            }
+            result[key]["sample"] = sample.clone()
+            result[key]["sampled_numel"] = sample.numel()
+        return result
+
+    def _make_hook(self, key: str):
+        def capture_output(_module, _inputs, output) -> None:
+            record = self._records[key]
+            record["call_count"] += 1
+            try:
+                tensor = extract_first_tensor(output)
+                if tensor is None:
+                    raise TypeError(f"unsupported layer output type: {type(output)!r}")
+                record["original_numel"] += tensor.numel()
+                record["shapes"].append(list(tensor.shape))
+                sampled_so_far = sum(sample.numel() for sample in record["samples"])
+                remaining = self.max_samples_per_layer - sampled_so_far
+                if remaining > 0:
+                    record["samples"].append(sample_tensor_values(tensor, max_samples=remaining))
+            except Exception as exc:
+                record["capture_errors"].append(f"{type(exc).__name__}: {exc}")
+
+        return capture_output
+
+    def _remove_hooks(self) -> None:
+        for handle in reversed(self._handles):
+            handle.remove()
+        self._handles.clear()
+        self._active = False
 
 
 def snapshot_named_parameters(models: nn.Module | Iterable[nn.Module]) -> ParameterSnapshot:
@@ -265,6 +351,189 @@ def build_logprob_interpolation_statistics(
     return points
 
 
+def extract_first_tensor(output: object) -> torch.Tensor | None:
+    """Return the first tensor in a tensor or nested tuple/list layer output."""
+    if isinstance(output, torch.Tensor):
+        return output
+    if isinstance(output, (tuple, list)):
+        for value in output:
+            tensor = extract_first_tensor(value)
+            if tensor is not None:
+                return tensor
+    return None
+
+
+def sample_tensor_values(tensor: torch.Tensor, *, max_samples: int) -> torch.Tensor:
+    """Return a deterministic, evenly strided CPU FP32 sample of ``tensor``."""
+    if max_samples <= 0:
+        raise ValueError(f"max_samples must be positive, got {max_samples}")
+    flattened = tensor.detach().reshape(-1)
+    if flattened.numel() <= max_samples:
+        sampled = flattened
+    else:
+        stride = math.ceil(flattened.numel() / max_samples)
+        sampled = flattened[::stride][:max_samples]
+    return sampled.to(device="cpu", dtype=torch.float32)
+
+
+def build_activation_delta_statistics(
+    bf16_values: torch.Tensor,
+    native_values: torch.Tensor,
+) -> dict[str, float | int | None]:
+    """Compare sampled BF16 and native layer outputs over finite value pairs."""
+    if bf16_values.shape != native_values.shape:
+        raise ValueError(
+            "Layer activation samples must have identical shapes: "
+            f"bf16={tuple(bf16_values.shape)}, native={tuple(native_values.shape)}"
+        )
+
+    bf16 = bf16_values.detach().to(device="cpu", dtype=torch.float64).reshape(-1)
+    native = native_values.detach().to(device="cpu", dtype=torch.float64).reshape(-1)
+    sample_count = bf16.numel()
+    finite_pair = torch.isfinite(bf16) & torch.isfinite(native)
+    bf16 = bf16[finite_pair]
+    native = native[finite_pair]
+    finite_pair_count = bf16.numel()
+    nonfinite_pair_count = sample_count - finite_pair_count
+    base: dict[str, float | int | None] = {
+        "sample_count": sample_count,
+        "finite_pair_count": finite_pair_count,
+        "nonfinite_pair_count": nonfinite_pair_count,
+        "nonfinite_fraction": nonfinite_pair_count / sample_count if sample_count else 0.0,
+    }
+    if finite_pair_count == 0:
+        return {**base, **_unavailable_activation_delta_statistics()}
+
+    delta = bf16 - native
+    absolute_delta = delta.abs()
+    quantiles = torch.quantile(absolute_delta, torch.tensor([0.5, 0.95, 0.99], dtype=torch.float64))
+    bf16_rms = float(bf16.square().mean().sqrt().item())
+    native_rms = float(native.square().mean().sqrt().item())
+    delta_rms = float(delta.square().mean().sqrt().item())
+    if bf16_rms == 0.0 and native_rms == 0.0:
+        cosine_similarity = 1.0
+    elif bf16_rms == 0.0 or native_rms == 0.0:
+        cosine_similarity = None
+    else:
+        cosine_similarity = float(
+            (torch.dot(bf16, native) / (torch.linalg.vector_norm(bf16) * torch.linalg.vector_norm(native)))
+            .clamp(-1.0, 1.0)
+            .item()
+        )
+    return {
+        **base,
+        "bf16_mean": float(bf16.mean().item()),
+        "bf16_rms": bf16_rms,
+        "bf16_abs_max": float(bf16.abs().max().item()),
+        "native_mean": float(native.mean().item()),
+        "native_rms": native_rms,
+        "native_abs_max": float(native.abs().max().item()),
+        "delta_mean": float(delta.mean().item()),
+        "delta_rms": delta_rms,
+        "relative_rms": _safe_divide(delta_rms, bf16_rms),
+        "delta_abs_mean": float(absolute_delta.mean().item()),
+        "delta_abs_p50": float(quantiles[0].item()),
+        "delta_abs_p95": float(quantiles[1].item()),
+        "delta_abs_p99": float(quantiles[2].item()),
+        "delta_abs_max": float(absolute_delta.max().item()),
+        "cosine_similarity": cosine_similarity,
+    }
+
+
+def build_layerwise_activation_statistics(
+    bf16_captures: Mapping[str, Mapping[str, object]],
+    native_captures: Mapping[str, Mapping[str, object]],
+    *,
+    max_samples_per_layer: int,
+) -> dict[str, object]:
+    """Match BF16/native layer captures and return ordered local-layer statistics."""
+    if max_samples_per_layer <= 0:
+        raise ValueError(
+            f"max_samples_per_layer must be positive, got {max_samples_per_layer}"
+        )
+    bf16_keys = set(bf16_captures)
+    native_keys = set(native_captures)
+    matched_keys = bf16_keys & native_keys
+    ordered_keys = sorted(matched_keys, key=lambda key: _layer_sort_key(key, bf16_captures[key]))
+    layers = []
+    for key in ordered_keys:
+        bf16_record = bf16_captures[key]
+        native_record = native_captures[key]
+        layer: dict[str, object] = {
+            "key": key,
+            "model_index": bf16_record.get("model_index"),
+            "module_name": bf16_record.get("module_name"),
+            "layer_number": bf16_record.get("layer_number"),
+            "module_class": bf16_record.get("module_class"),
+            "module_package": bf16_record.get("module_package"),
+            "bf16_call_count": bf16_record.get("call_count"),
+            "native_call_count": native_record.get("call_count"),
+            "bf16_original_numel": bf16_record.get("original_numel"),
+            "native_original_numel": native_record.get("original_numel"),
+            "bf16_sampled_numel": bf16_record.get("sampled_numel"),
+            "native_sampled_numel": native_record.get("sampled_numel"),
+            "bf16_shapes": bf16_record.get("shapes"),
+            "native_shapes": native_record.get("shapes"),
+            "bf16_capture_errors": bf16_record.get("capture_errors"),
+            "native_capture_errors": native_record.get("capture_errors"),
+        }
+        try:
+            layer.update(
+                build_activation_delta_statistics(
+                    bf16_record["sample"],
+                    native_record["sample"],
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            layer["statistics_error"] = f"{type(exc).__name__}: {exc}"
+        layers.append(layer)
+
+    return {
+        "scope": "local_model_shard",
+        "parameter_state": "post_optimizer_step",
+        "model_mode": "eval",
+        "sampling_method": "deterministic_stride",
+        "max_samples_per_layer": max_samples_per_layer,
+        "bf16_layer_count": len(bf16_keys),
+        "native_layer_count": len(native_keys),
+        "matched_layer_count": len(matched_keys),
+        "unmatched_bf16_layers": sorted(bf16_keys - native_keys),
+        "unmatched_native_layers": sorted(native_keys - bf16_keys),
+        "layers": layers,
+    }
+
+
+def _iter_transformer_layers(
+    models: nn.Module | Iterable[nn.Module],
+) -> Iterator[tuple[str, nn.Module, dict[str, object]]]:
+    model_iterable = [models] if isinstance(models, nn.Module) else models
+    for model_index, model in enumerate(model_iterable):
+        if not isinstance(model, nn.Module):
+            raise TypeError(f"Expected torch.nn.Module, got {type(model)!r}")
+        for module_name, module in model.named_modules():
+            if module.__class__.__name__ != "TransformerLayer":
+                continue
+            key = f"model{model_index}.{module_name}"
+            yield key, module, {
+                "model_index": model_index,
+                "module_name": module_name,
+                "layer_number": getattr(module, "layer_number", None),
+                "module_class": module.__class__.__name__,
+                "module_package": module.__class__.__module__,
+            }
+
+
+def _layer_sort_key(key: str, record: Mapping[str, object]) -> tuple[int, int, str, str]:
+    layer_number = record.get("layer_number")
+    model_index = record.get("model_index")
+    return (
+        int(layer_number) if isinstance(layer_number, int) else 2**31 - 1,
+        int(model_index) if isinstance(model_index, int) else 2**31 - 1,
+        str(record.get("module_name", "")),
+        key,
+    )
+
+
 def _iter_named_parameters(models: nn.Module | Iterable[nn.Module]) -> Iterator[tuple[str, nn.Parameter]]:
     model_iterable = [models] if isinstance(models, nn.Module) else models
     for model_index, model in enumerate(model_iterable):
@@ -383,4 +652,24 @@ def _unavailable_logprob_delta_statistics() -> DiagnosticStatistics:
         "half_delta_sq_mean": None,
         "ratio_outside_0_8_1_2_fraction": None,
         "ratio_nonfinite_fraction": None,
+    }
+
+
+def _unavailable_activation_delta_statistics() -> dict[str, None]:
+    return {
+        "bf16_mean": None,
+        "bf16_rms": None,
+        "bf16_abs_max": None,
+        "native_mean": None,
+        "native_rms": None,
+        "native_abs_max": None,
+        "delta_mean": None,
+        "delta_rms": None,
+        "relative_rms": None,
+        "delta_abs_mean": None,
+        "delta_abs_p50": None,
+        "delta_abs_p95": None,
+        "delta_abs_p99": None,
+        "delta_abs_max": None,
+        "cosine_similarity": None,
     }

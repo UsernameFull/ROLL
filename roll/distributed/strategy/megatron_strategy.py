@@ -69,6 +69,8 @@ from roll.third_party.megatron.router_replay_utils import (
 )
 from roll.third_party.megatron.tensor_parallel import vocab_parallel_entropy
 from roll.third_party.megatron.update_diagnostics import (
+    LayerActivationCapture,
+    build_layerwise_activation_statistics,
     build_logprob_interpolation_statistics,
     build_masked_logprob_delta_statistics,
     build_parameter_update_statistics,
@@ -1312,7 +1314,13 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         zero_loss = torch.zeros((), device=output_tensor.device)
         return zero_loss, {"log_probs": log_probs.detach()}
 
-    def _run_logprob_probe(self, batch: DataProto, *, disable_fp8: bool):
+    def _run_logprob_probe(
+        self,
+        batch: DataProto,
+        *,
+        disable_fp8: bool,
+        layer_capture: LayerActivationCapture | None = None,
+    ):
         """Run a bounded no-grad logprob probe without changing persistent model mode."""
         config = self.model.config
         if disable_fp8 and getattr(config, "fp8_param", False):
@@ -1327,11 +1335,15 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                     saved_config[field_name] = getattr(config, field_name)
                     setattr(config, field_name, None)
 
-        training_modes = [model.training for model in self.model.get_models()]
+        forward_models = self.model.get_models()
+        training_modes = [model.training for model in forward_models]
+        for model in forward_models:
+            model.eval()
         probe_batch = batch.clone()
         probe_batch.meta_info["micro_batch_size"] = max(len(probe_batch), 1)
         try:
-            with torch.no_grad():
+            capture_context = layer_capture if layer_capture is not None else nullcontext()
+            with torch.no_grad(), capture_context:
                 results = self.forward_step(batch=probe_batch, forward_func=self._forward_logprob_probe)
             if results is None:
                 return None, None
@@ -1343,7 +1355,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         finally:
             for field_name, value in saved_config.items():
                 setattr(config, field_name, value)
-            for model, training in zip(self.model.get_models(), training_modes):
+            for model, training in zip(forward_models, training_modes):
                 model.train(training)
 
     def _reduce_parameter_update_statistics(self, local_statistics: dict, learning_rate: float | None) -> dict:
@@ -1492,8 +1504,25 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                 native_before = before_payload["log_probs"]
                 native_mask = before_payload["response_mask"]
 
-        bf16_after, bf16_after_error = self._run_logprob_probe(probe_batch, disable_fp8=True)
-        native_after, native_after_error = self._run_logprob_probe(probe_batch, disable_fp8=False)
+        max_layer_samples = 65_536
+        bf16_layer_capture = LayerActivationCapture(
+            self.models_unwrapped,
+            max_samples_per_layer=max_layer_samples,
+        )
+        native_layer_capture = LayerActivationCapture(
+            self.models_unwrapped,
+            max_samples_per_layer=max_layer_samples,
+        )
+        bf16_after, bf16_after_error = self._run_logprob_probe(
+            probe_batch,
+            disable_fp8=True,
+            layer_capture=bf16_layer_capture,
+        )
+        native_after, native_after_error = self._run_logprob_probe(
+            probe_batch,
+            disable_fp8=False,
+            layer_capture=native_layer_capture,
+        )
         probe_mask = probe_batch.batch["response_mask"][:, 1:].detach().to(device="cpu", dtype=torch.bool)
 
         diagnostics = {
@@ -1523,6 +1552,21 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         except Exception as exc:
             diagnostics["statistics_error"] = f"{type(exc).__name__}: {exc}"
             logger.warning(f"RLVR post-update logprob statistics failed: {exc}")
+        try:
+            if bf16_after_error is not None or native_after_error is not None:
+                diagnostics["layerwise_error"] = (
+                    "layerwise capture requires successful BF16 and native probes: "
+                    f"bf16={bf16_after_error}, native={native_after_error}"
+                )
+            else:
+                diagnostics["layerwise_bf16_vs_native_after"] = build_layerwise_activation_statistics(
+                    bf16_layer_capture.snapshot(),
+                    native_layer_capture.snapshot(),
+                    max_samples_per_layer=max_layer_samples,
+                )
+        except Exception as exc:
+            diagnostics["layerwise_error"] = f"{type(exc).__name__}: {exc}"
+            logger.warning(f"RLVR layerwise activation statistics failed: {exc}")
         if parameter_before is not None and parameter_after is not None:
             diagnostics["parameter_interpolation"] = self._build_parameter_interpolation_diagnostics(
                 probe_batch=probe_batch,

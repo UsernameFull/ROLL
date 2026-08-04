@@ -5,6 +5,7 @@ import torch
 
 
 LOG_PREFIX = "[RLVR_LOGPROB_DIAG]"
+INFERENCE_LOG_PREFIX = "[RLVR_INFER_DIAG]"
 DIAGNOSTICS_META_KEY = "rlvr_logprob_diagnostics"
 PRIVATE_METRIC_PREFIX = "_rlvr_logprob_diag/"
 
@@ -101,6 +102,97 @@ def build_token_logprob_records(
                 }
             )
     return records
+
+
+def build_inference_logprob_diagnostics(
+    *,
+    input_ids: torch.Tensor,
+    response_mask: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    infer_log_probs: torch.Tensor,
+    teacher_log_probs: torch.Tensor,
+    max_records: int = 64,
+) -> Dict[str, object]:
+    """Compare vLLM decode, vLLM teacher forcing, and Megatron logprobs."""
+    response = response_mask.detach().bool()
+    old = old_log_probs.detach().float()
+    infer = infer_log_probs.detach().float()
+    teacher = teacher_log_probs.detach().float()
+    labels = input_ids.detach()[:, 1:]
+
+    if not (response.shape == old.shape == infer.shape == teacher.shape == labels.shape):
+        raise ValueError(
+            "inference diagnostic tensors must share [batch, sequence - 1] shape: "
+            f"response={tuple(response.shape)}, old={tuple(old.shape)}, infer={tuple(infer.shape)}, "
+            f"teacher={tuple(teacher.shape)}, labels={tuple(labels.shape)}"
+        )
+
+    response_count = int(response.sum().item())
+    if response_count == 0:
+        return {}
+
+    teacher_scored = response & torch.isfinite(teacher)
+    valid = teacher_scored & torch.isfinite(old) & torch.isfinite(infer)
+    token_count = int(valid.sum().item())
+    if token_count == 0:
+        return {}
+
+    records: List[Dict[str, object]] = []
+    for sample_tensor, position_tensor in torch.nonzero(valid, as_tuple=False)[:max_records]:
+        sample_idx = int(sample_tensor.item())
+        position = int(position_tensor.item())
+        old_value = float(old[sample_idx, position].item())
+        infer_value = float(infer[sample_idx, position].item())
+        teacher_value = float(teacher[sample_idx, position].item())
+        records.append(
+            {
+                "sample_idx": sample_idx,
+                "sequence_position": position + 1,
+                "token_id": int(labels[sample_idx, position].item()),
+                "old_logp": old_value,
+                "decode_logp": infer_value,
+                "teacher_logp": teacher_value,
+                "decode_minus_teacher": infer_value - teacher_value,
+                "old_minus_teacher": old_value - teacher_value,
+                "old_minus_decode": old_value - infer_value,
+            }
+        )
+
+    return {
+        "token_count": token_count,
+        "response_token_count": response_count,
+        "scored_response_fraction": float(teacher_scored.sum().item() / response_count),
+        "decode_minus_teacher": _build_logprob_delta_statistics(infer, teacher, valid),
+        "old_minus_teacher": _build_logprob_delta_statistics(old, teacher, valid),
+        "old_minus_decode": _build_logprob_delta_statistics(old, infer, valid),
+        "records": records,
+    }
+
+
+def _build_logprob_delta_statistics(
+    left: torch.Tensor,
+    right: torch.Tensor,
+    mask: torch.Tensor,
+) -> Dict[str, float]:
+    """Return robust statistics for ``left - right`` over ``mask``."""
+    delta = (left - right)[mask]
+    abs_delta = delta.abs()
+    quantiles = torch.quantile(
+        abs_delta,
+        torch.tensor([0.5, 0.95, 0.99], device=delta.device, dtype=delta.dtype),
+    )
+    ratio = torch.exp(delta)
+    ratio_outside = (ratio < 0.8) | (ratio > 1.2) | ~torch.isfinite(ratio)
+    return {
+        "delta_mean": float(delta.mean().item()),
+        "delta_rms": float(delta.square().mean().sqrt().item()),
+        "delta_abs_mean": float(abs_delta.mean().item()),
+        "delta_abs_p50": float(quantiles[0].item()),
+        "delta_abs_p95": float(quantiles[1].item()),
+        "delta_abs_p99": float(quantiles[2].item()),
+        "delta_abs_max": float(abs_delta.max().item()),
+        "ratio_outside_0_8_1_2_fraction": float(ratio_outside.float().mean().item()),
+    }
 
 
 def _safe_exp(value: float) -> float:

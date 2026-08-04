@@ -4,7 +4,8 @@ import numpy as np
 import pytest
 import torch
 
-from roll.utils.functionals import agg_loss, divide_by_chunk_size, pad_to_length, traverse_obj
+from roll.distributed.scheduler.protocol import DataProto
+from roll.utils.functionals import agg_loss, divide_by_chunk_size, pad_to_length, postprocess_generate, traverse_obj
 
 
 def visitor(obj: object, path: Tuple):
@@ -53,6 +54,35 @@ def test_pad_to_length():
 
     padded_tensor = pad_to_length(tensor, length, pad_value, dim=-1)
     print(padded_tensor)
+
+
+def test_postprocess_generate_aligns_teacher_forced_logprobs_with_response_tokens():
+    prompts = DataProto.from_single_dict(
+        {
+            "input_ids": torch.tensor([[0, 10, 11]]),
+            "attention_mask": torch.tensor([[0, 1, 1]]),
+            "position_ids": torch.tensor([[0, 0, 1]]),
+        }
+    )
+
+    output = postprocess_generate(
+        prompts=prompts,
+        output=torch.tensor([[0, 10, 11, 12, 13]]),
+        num_return_sequences=1,
+        sequence_length=5,
+        eos_token_id=99,
+        pad_token_id=0,
+        output_logprobs=[[-1.2, -1.3]],
+        teacher_forced_output_logprobs=[[-1.1, -1.4]],
+    )
+
+    assert output.batch["input_ids"].tolist() == [[10, 11, 12, 13, 13]]
+    assert output.batch["response_mask"].tolist() == [[0, 0, 1, 1, 0]]
+    assert output.batch["infer_logprobs"].tolist() == [[0.0, -1.2, -1.3, 0.0]]
+    teacher = output.batch["infer_teacher_logprobs"]
+    assert torch.isnan(teacher[0, 0])
+    assert teacher[0, 1:3].tolist() == pytest.approx([-1.1, -1.4])
+    assert torch.isnan(teacher[0, 3])
 
 
 def test_agg_loss_token_mean_excludes_masked_values():

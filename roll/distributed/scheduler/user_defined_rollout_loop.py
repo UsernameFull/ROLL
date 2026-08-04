@@ -71,6 +71,14 @@ def postprocess_paused_data(pre_data, data: DataProto, sequence_length, prompt_l
         assert len(pre_value) == len(cur_value)
         pre_value = [pre_value[i] + cur_value[i] for i in range(len(pre_value))]
         data.meta_info[f"pre_{key}"] = pre_value
+    if data.meta_info.get("teacher_forced_output_logprobs") is not None:
+        key = "teacher_forced_output_logprobs"
+        cur_value = data.meta_info.pop(key)
+        pre_value = pre_data.meta_info.get(f"pre_{key}", [[]] * len(cur_value))
+        assert len(pre_value) == len(cur_value)
+        data.meta_info[f"pre_{key}"] = [
+            pre_value[i] + cur_value[i] for i in range(len(cur_value))
+        ]
     new_batch = {**pre_data.batch}
 
     if "routed_experts" in data.meta_info:
@@ -139,6 +147,17 @@ def postprocess_output_data(request, data: DataProto, sequence_length) -> DataPr
         pre_output_logprobs = request.meta_info.get("pre_output_logprobs", [[]] * len(output_token_ids))
         output_logprobs = [pre_output_logprobs[i] + output_logprobs[i] for i in range(len(pre_output_logprobs))]
 
+    teacher_forced_output_logprobs = data.meta_info.get("teacher_forced_output_logprobs", None)
+    if teacher_forced_output_logprobs is not None:
+        pre_teacher_logprobs = request.meta_info.get(
+            "pre_teacher_forced_output_logprobs",
+            [[]] * len(output_token_ids),
+        )
+        teacher_forced_output_logprobs = [
+            pre_teacher_logprobs[i] + teacher_forced_output_logprobs[i]
+            for i in range(len(pre_teacher_logprobs))
+        ]
+
     # new: process routed_experts
     routed_experts = data.meta_info.get("routed_experts", None)
     if routed_experts is not None:
@@ -161,6 +180,7 @@ def postprocess_output_data(request, data: DataProto, sequence_length) -> DataPr
         eos_token_id=eos_token_id,
         pad_token_id=pad_token_id,
         output_logprobs=output_logprobs,
+        teacher_forced_output_logprobs=teacher_forced_output_logprobs,
         routed_experts=routed_experts,
     )
     request_repeat = request.repeat(repeat_times=len(output_tokens))

@@ -1,7 +1,8 @@
 import asyncio
 import importlib
+import math
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -48,6 +49,11 @@ class MockLoRARequest:
 
 class MockTokensPrompt(dict):
     pass
+
+
+class MockLogprob:
+    def __init__(self, logprob):
+        self.logprob = logprob
 
 
 from roll.distributed.scheduler.protocol import DataProto
@@ -181,6 +187,60 @@ class TestVllmStrategyBeamSearch:
         # Test with num_beams = 1
         config_single_beam = {"num_beams": 1, "max_new_tokens": 50}
         assert vllm_strategy._should_use_beam_search(config_single_beam) is False
+
+    def test_extract_chosen_prompt_logprobs_preserves_alignment(self, vllm_strategy_module):
+        prompt_ids = [10, 11, 12, 13]
+        prompt_logprobs = [
+            None,
+            {11: MockLogprob(-1.1), 99: MockLogprob(-0.1)},
+            None,
+            {13: MockLogprob(-1.3)},
+        ]
+
+        values = vllm_strategy_module._extract_chosen_prompt_logprobs(prompt_ids, prompt_logprobs)
+
+        assert math.isnan(values[0])
+        assert values[1] == pytest.approx(-1.1)
+        assert math.isnan(values[2])
+        assert values[3] == pytest.approx(-1.3)
+
+    def test_infer_diagnostic_claim_is_bounded(self, vllm_strategy):
+        vllm_strategy._infer_diagnostic_requests_remaining = 1
+        vllm_strategy._infer_diagnostic_claim_lock = asyncio.Lock()
+
+        async def claim_twice():
+            return await asyncio.gather(
+                vllm_strategy._claim_infer_diagnostic_request(),
+                vllm_strategy._claim_infer_diagnostic_request(),
+            )
+
+        assert asyncio.run(claim_twice()) == [True, False]
+
+    def test_score_teacher_forced_completion_returns_completion_span(self, vllm_strategy):
+        async def mock_generate(prompt, sampling_params, request_id, lora_request):
+            token_ids = prompt["prompt_token_ids"]
+            prompt_logprobs = [None]
+            prompt_logprobs.extend(
+                {token_id: MockLogprob(-float(position))}
+                for position, token_id in enumerate(token_ids[1:], start=1)
+            )
+            yield SimpleNamespace(prompt_logprobs=prompt_logprobs)
+
+        vllm_strategy.model.generate = Mock(side_effect=mock_generate)
+
+        values = asyncio.run(
+            vllm_strategy._score_teacher_forced_completion(
+                prompt_token_ids=[10, 11],
+                completion_token_ids=[12, 13],
+                request_id="request-1",
+                lora_request=None,
+            )
+        )
+
+        assert values == pytest.approx([-2.0, -3.0])
+        sampling_params = vllm_strategy.model.generate.call_args.kwargs["sampling_params"]
+        assert sampling_params.prompt_logprobs == 1
+        assert sampling_params.temperature == 0.0
 
     def test_generate_with_beam_search_success(self, vllm_strategy, sample_batch):
         """Test successful beam search generation."""

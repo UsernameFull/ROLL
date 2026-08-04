@@ -9,6 +9,7 @@ from roll.pipeline.rlvr.actor_worker import ActorWorker
 from roll.pipeline.rlvr.logprob_diagnostics import (
     DIAGNOSTICS_META_KEY,
     PRIVATE_METRIC_PREFIX,
+    build_inference_logprob_diagnostics,
     build_ratio_statistics,
     build_token_logprob_records,
     diagnostics_enabled,
@@ -111,6 +112,42 @@ def test_build_token_logprob_records_is_bounded_and_aligned():
     assert records[0]["sequence_position"] == 2
     assert records[0]["current_old_ratio"] == 1.0
     assert math.isclose(records[0]["old_infer_ratio"], math.e)
+
+
+def test_build_inference_logprob_diagnostics_uses_only_finite_scored_tokens():
+    input_ids = torch.tensor([[10, 11, 12, 13, 14]])
+    response_mask = torch.tensor([[0, 1, 1, 1]])
+    old = torch.tensor([[0.0, -1.0, -2.0, -3.0]])
+    infer = torch.tensor([[0.0, -1.2, -2.1, -3.4]])
+    teacher = torch.tensor([[float("nan"), -1.1, float("nan"), -3.2]])
+
+    payload = build_inference_logprob_diagnostics(
+        input_ids=input_ids,
+        response_mask=response_mask,
+        old_log_probs=old,
+        infer_log_probs=infer,
+        teacher_log_probs=teacher,
+    )
+
+    assert payload["token_count"] == 2
+    assert payload["scored_response_fraction"] == pytest.approx(2 / 3)
+    assert payload["decode_minus_teacher"]["delta_rms"] == pytest.approx(math.sqrt(0.025))
+    assert payload["old_minus_teacher"]["delta_mean"] == pytest.approx(0.15)
+    assert payload["old_minus_decode"]["delta_mean"] == pytest.approx(0.3)
+    assert [record["token_id"] for record in payload["records"]] == [12, 14]
+    assert [record["sequence_position"] for record in payload["records"]] == [2, 4]
+
+
+def test_build_inference_logprob_diagnostics_returns_empty_without_scored_tokens():
+    payload = build_inference_logprob_diagnostics(
+        input_ids=torch.tensor([[10, 11, 12]]),
+        response_mask=torch.tensor([[1, 1]]),
+        old_log_probs=torch.zeros((1, 2)),
+        infer_log_probs=torch.zeros((1, 2)),
+        teacher_log_probs=torch.full((1, 2), float("nan")),
+    )
+
+    assert payload == {}
 
 
 def test_actor_worker_consumes_first_update_probe_before_once():

@@ -6,6 +6,7 @@ from roll.pipeline.base_worker import ActorWorker as BaseActorWorker
 from roll.pipeline.rlvr.logprob_diagnostics import (
     DIAGNOSTICS_META_KEY,
     PRIVATE_METRIC_PREFIX,
+    build_inference_logprob_diagnostics,
     build_ratio_statistics,
     build_token_logprob_records,
     diagnostics_enabled,
@@ -19,6 +20,7 @@ class ActorWorker(BaseActorWorker):
     def __init__(self, worker_config):
         super().__init__(worker_config=worker_config)
         self._logged_first_logprob_detail = False
+        self._logged_first_inference_detail = False
         self._driver_logprob_diagnostics = []
         self._first_update_probe_before = None
 
@@ -172,6 +174,30 @@ class ActorWorker(BaseActorWorker):
                 )
             except Exception as exc:
                 self.logger.warning(f"RLVR logprob diagnostic failed to format token logprobs: {exc}")
+
+        teacher_log_probs = data.batch.get("infer_teacher_logprobs")
+        if log_diagnostics and not self._logged_first_inference_detail and teacher_log_probs is not None:
+            try:
+                inference_diagnostics = build_inference_logprob_diagnostics(
+                    input_ids=data.batch["input_ids"],
+                    response_mask=response_mask,
+                    old_log_probs=old_log_probs,
+                    infer_log_probs=infer_log_probs,
+                    teacher_log_probs=teacher_log_probs,
+                )
+                if inference_diagnostics:
+                    self._logged_first_inference_detail = True
+                    self._driver_logprob_diagnostics.append(
+                        {
+                            "event": "inference_teacher_forced_logprobs",
+                            "rank": self.rank,
+                            "global_step": global_step,
+                            "optimizer_batch_idx": optimizer_batch_idx,
+                            **inference_diagnostics,
+                        }
+                    )
+            except Exception as exc:
+                self.logger.warning(f"RLVR inference diagnostic failed to compare logprobs: {exc}")
 
         if self.pipeline_config.use_kl_loss:
             total_loss = weighted_pg_loss + kl_loss * self.pipeline_config.kl_loss_coef

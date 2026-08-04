@@ -1208,6 +1208,7 @@ def postprocess_generate(
     pad_token_id,
     fill_eos_token=False,
     output_logprobs: Optional[list[list[float]]] = None,
+    teacher_forced_output_logprobs: Optional[list[list[float]]] = None,
     routed_experts: Optional[list[torch.Tensor]]=None,
     pad_to_seq_len=True,
 ) -> "DataProto":
@@ -1284,6 +1285,11 @@ def postprocess_generate(
         if output_logprobs is not None
         else None
     )
+    teacher_logprobs = (
+        torch.full([output_batch_size, sequence_length - 1], float("nan"), dtype=torch.float32)
+        if teacher_forced_output_logprobs is not None
+        else None
+    )
 
     for i in range(output_batch_size):
         shift = first_one[i].item()
@@ -1300,6 +1306,10 @@ def postprocess_generate(
         if logprobs is not None:
             logprobs[i][prompt_len - 1 : valid_length - 1] = torch.tensor(
                 output_logprobs[i][:response_length], dtype=logprobs.dtype
+            )
+        if teacher_logprobs is not None:
+            teacher_logprobs[i][prompt_len - 1 : valid_length - 1] = torch.tensor(
+                teacher_forced_output_logprobs[i][:response_length], dtype=teacher_logprobs.dtype
             )
         if new_routed_experts is not None:
             # new_routed_experts[i, :valid_length - 1] = routed_experts[i]
@@ -1343,6 +1353,8 @@ def postprocess_generate(
         batch["prompt_id"] = prompt_id
     if logprobs is not None:
         batch["infer_logprobs"] = logprobs
+    if teacher_logprobs is not None:
+        batch["infer_teacher_logprobs"] = teacher_logprobs
     if new_routed_experts is not None:
         batch["routed_experts"] = new_routed_experts
     return DataProto(batch=batch)

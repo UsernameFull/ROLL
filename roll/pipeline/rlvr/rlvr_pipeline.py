@@ -31,6 +31,7 @@ from roll.utils.constants import RAY_NAMESPACE
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.pipeline.rlvr.logprob_diagnostics import (
     DIAGNOSTICS_META_KEY,
+    INFERENCE_LOG_PREFIX,
     LOG_PREFIX,
     flatten_diagnostic_payloads,
 )
@@ -802,7 +803,12 @@ class RLVRPipeline(BasePipeline):
                             )
                             diagnostic_payloads = actor_train_metrics.meta_info.pop(DIAGNOSTICS_META_KEY, [])
                             for diagnostic in flatten_diagnostic_payloads(diagnostic_payloads):
-                                logger.info(f"{LOG_PREFIX} " + json.dumps(diagnostic, ensure_ascii=False))
+                                prefix = (
+                                    INFERENCE_LOG_PREFIX
+                                    if diagnostic.get("event") == "inference_teacher_forced_logprobs"
+                                    else LOG_PREFIX
+                                )
+                                logger.info(f"{prefix} " + json.dumps(diagnostic, ensure_ascii=False))
                             metrics_mgr.add_reduced_metrics(actor_train_metrics.meta_info.pop("metrics", {}))
 
                     if self.pipeline_config.adv_estimator == "gae":

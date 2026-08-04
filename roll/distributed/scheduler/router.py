@@ -609,6 +609,9 @@ class RouterClient:
         output_data.meta_info["finish_reasons"] = response["finish_reasons"]
         output_data.meta_info["output_token_ids"] = response.get("output_token_ids", None)
         output_data.meta_info["output_logprobs"] = response.get("output_logprobs", None)
+        output_data.meta_info["teacher_forced_output_logprobs"] = response.get(
+            "teacher_forced_output_logprobs", None
+        )
         # TODO: The size of routed_experts is [b * s * layer * topk].
         # For the 30A3 model, this data block is tens of MB in size.
         # The serialization overhead of Ray transmission needs to be profiled again.

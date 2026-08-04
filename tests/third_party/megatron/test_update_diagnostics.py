@@ -5,6 +5,7 @@ import torch
 from torch import nn
 
 from roll.third_party.megatron.update_diagnostics import (
+    build_logprob_repeatability_statistics,
     build_masked_logprob_delta_statistics,
     build_parameter_update_statistics,
     snapshot_named_parameters,
@@ -132,3 +133,56 @@ def test_build_masked_logprob_delta_statistics_handles_empty_mask_and_nonfinite_
 def test_build_masked_logprob_delta_statistics_rejects_shape_mismatch():
     with pytest.raises(ValueError, match="Mask shape"):
         build_masked_logprob_delta_statistics(torch.ones(2), torch.ones(2), torch.ones(1))
+
+
+def test_build_logprob_repeatability_statistics_compares_fixed_run_pairs():
+    mask = torch.tensor([[True, True, False]])
+    bf16_runs = [torch.zeros(1, 3), torch.tensor([[0.1, -0.1, 9.0]])]
+    native_runs = [
+        torch.tensor([[0.2, 0.2, 9.0]]),
+        torch.tensor([[0.4, 0.0, 9.0]]),
+        torch.tensor([[0.7, -0.3, 9.0]]),
+    ]
+
+    stats = build_logprob_repeatability_statistics(
+        bf16_runs=bf16_runs,
+        native_runs=native_runs,
+        mask=mask,
+    )
+
+    assert set(stats) == {
+        "bf16_repeat_2_vs_1",
+        "native_repeat_2_vs_1",
+        "native_repeat_3_vs_2",
+        "bf16_vs_native_first",
+    }
+    assert stats["bf16_repeat_2_vs_1"]["delta_rms"] == pytest.approx(0.1)
+    assert stats["native_repeat_2_vs_1"]["delta_rms"] == pytest.approx(0.2)
+    assert stats["native_repeat_3_vs_2"]["delta_rms"] == pytest.approx(0.3)
+    assert stats["bf16_vs_native_first"]["delta_mean"] == pytest.approx(-0.2)
+
+
+def test_build_logprob_repeatability_statistics_skips_unavailable_pipeline_outputs():
+    stats = build_logprob_repeatability_statistics(
+        bf16_runs=[None, None],
+        native_runs=[torch.zeros(1, 1), torch.ones(1, 1), None],
+        mask=torch.ones(1, 1, dtype=torch.bool),
+    )
+
+    assert set(stats) == {"native_repeat_2_vs_1"}
+
+
+@pytest.mark.parametrize(
+    ("bf16_runs", "native_runs", "message"),
+    [
+        ([torch.zeros(1)], [torch.zeros(1)] * 3, "2 BF16"),
+        ([torch.zeros(1)] * 2, [torch.zeros(1)] * 2, "3 native"),
+    ],
+)
+def test_build_logprob_repeatability_statistics_validates_run_counts(bf16_runs, native_runs, message):
+    with pytest.raises(ValueError, match=message):
+        build_logprob_repeatability_statistics(
+            bf16_runs=bf16_runs,
+            native_runs=native_runs,
+            mask=torch.ones(1, dtype=torch.bool),
+        )

@@ -1,7 +1,7 @@
 """CPU-only helpers for diagnosing optimizer updates and log-probability drift."""
 
 import math
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import Optional, TypeAlias
 
 import torch
@@ -137,6 +137,31 @@ def build_masked_logprob_delta_statistics(
         "ratio_nonfinite_fraction": float(
             (nonfinite_token_count + (~ratio_finite).double().sum().item()) / token_count
         ),
+    }
+
+
+def build_logprob_repeatability_statistics(
+    *,
+    bf16_runs: Sequence[torch.Tensor | None],
+    native_runs: Sequence[torch.Tensor | None],
+    mask: torch.Tensor,
+) -> dict[str, DiagnosticStatistics]:
+    """Compare repeated BF16/native forwards executed at fixed parameters."""
+    if len(bf16_runs) != 2:
+        raise ValueError(f"Expected exactly 2 BF16 runs, got {len(bf16_runs)}")
+    if len(native_runs) != 3:
+        raise ValueError(f"Expected exactly 3 native runs, got {len(native_runs)}")
+
+    comparisons = {
+        "bf16_repeat_2_vs_1": (bf16_runs[1], bf16_runs[0]),
+        "native_repeat_2_vs_1": (native_runs[1], native_runs[0]),
+        "native_repeat_3_vs_2": (native_runs[2], native_runs[1]),
+        "bf16_vs_native_first": (bf16_runs[0], native_runs[0]),
+    }
+    return {
+        name: build_masked_logprob_delta_statistics(after, before, mask)
+        for name, (after, before) in comparisons.items()
+        if after is not None and before is not None
     }
 
 

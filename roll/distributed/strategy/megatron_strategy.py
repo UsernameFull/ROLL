@@ -69,6 +69,7 @@ from roll.third_party.megatron.router_replay_utils import (
 )
 from roll.third_party.megatron.tensor_parallel import vocab_parallel_entropy
 from roll.third_party.megatron.update_diagnostics import (
+    build_logprob_repeatability_statistics,
     build_masked_logprob_delta_statistics,
     build_parameter_update_statistics,
     snapshot_named_parameters,
@@ -1397,6 +1398,52 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             "top_parameters_local": local_statistics["top_parameters"],
         }
 
+    def _build_no_step_repeatability_diagnostics(self, probe_batch: DataProto) -> dict:
+        """Repeat fixed-parameter BF16/native forwards without an optimizer step."""
+        models = self.model.get_models()
+        training_modes = [model.training for model in models]
+        bf16_runs = []
+        native_runs = []
+        probe_errors = {}
+        try:
+            for model in models:
+                model.eval()
+
+            for run_index in range(2):
+                result, error = self._run_logprob_probe(probe_batch, disable_fp8=True)
+                bf16_runs.append(result)
+                probe_errors[f"bf16_run_{run_index + 1}"] = error
+
+            for run_index in range(3):
+                result, error = self._run_logprob_probe(probe_batch, disable_fp8=False)
+                native_runs.append(result)
+                probe_errors[f"native_run_{run_index + 1}"] = error
+        finally:
+            for model, training in zip(models, training_modes):
+                model.train(training)
+
+        diagnostics = {
+            "parameter_state": "post_optimizer_step",
+            "model_mode": "eval",
+            "optimizer_step_between_repeats": False,
+            "native_precision": "fp8" if getattr(self.model.config, "fp8", None) else "bf16",
+            "native_probe_may_update_fp8_metadata": bool(getattr(self.model.config, "fp8", None)),
+            "probe_errors": probe_errors,
+        }
+        probe_mask = probe_batch.batch["response_mask"][:, 1:].detach().to(device="cpu", dtype=torch.bool)
+        try:
+            diagnostics.update(
+                build_logprob_repeatability_statistics(
+                    bf16_runs=bf16_runs,
+                    native_runs=native_runs,
+                    mask=probe_mask,
+                )
+            )
+        except Exception as exc:
+            diagnostics["statistics_error"] = f"{type(exc).__name__}: {exc}"
+            logger.warning(f"RLVR no-step repeatability statistics failed: {exc}")
+        return diagnostics
+
     def _build_logprob_probe_diagnostics(
         self,
         probe_batch: DataProto,
@@ -1444,6 +1491,11 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         except Exception as exc:
             diagnostics["statistics_error"] = f"{type(exc).__name__}: {exc}"
             logger.warning(f"RLVR post-update logprob statistics failed: {exc}")
+        try:
+            diagnostics["repeatability"] = self._build_no_step_repeatability_diagnostics(probe_batch)
+        except Exception as exc:
+            diagnostics["repeatability_error"] = f"{type(exc).__name__}: {exc}"
+            logger.warning(f"RLVR no-step repeatability probe failed: {exc}")
         return diagnostics
 
     def train_step(self, batch: DataProto, loss_func: Callable):

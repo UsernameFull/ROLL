@@ -1,7 +1,7 @@
 import gc
 import hashlib
 import json
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from contextlib import nullcontext
 from typing import Iterable, Optional, Tuple
 
@@ -637,18 +637,7 @@ class WorkerBase:
             return
 
         self.reload_model()
-        recent_parameters = deque(maxlen=12)
-
-        def traced_named_params():
-            for name, weight in named_params:
-                recent_parameters.append((name, tuple(weight.shape), weight.dtype))
-                yield name, weight
-
-        try:
-            self._load_weights_internal(self.model_runner.model, traced_named_params())
-        except Exception:
-            logger.exception("Failed to update vLLM parameters; recent inputs: %s", list(recent_parameters))
-            raise
+        self._load_weights_internal(self.model_runner.model, named_params)
 
     def process_weights_after_loading(self):
         if self._is_mxfp8_model and self._model_update_in_progress:

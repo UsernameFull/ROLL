@@ -29,12 +29,6 @@ from roll.models.model_providers import default_tokenizer_provider
 from roll.pipeline.base_pipeline import BasePipeline
 from roll.utils.constants import RAY_NAMESPACE
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
-from roll.pipeline.rlvr.logprob_diagnostics import (
-    DIAGNOSTICS_META_KEY,
-    INFERENCE_LOG_PREFIX,
-    LOG_PREFIX,
-    flatten_diagnostic_payloads,
-)
 from roll.pipeline.rlvr.utils import dump_rollout_to_specific_path
 from roll.utils.dynamic_batching import dynamic_batching_shard
 from roll.utils.functionals import (
@@ -798,17 +792,8 @@ class RLVRPipeline(BasePipeline):
                                 metrics_mgr.add_metrics(dynamic_batching_metrics)
                             actor_train_metrics_refs = self.actor_train.train_step(batch, blocking=False)
                             actor_train_metrics: DataProto = DataProto.materialize_concat(
-                                data_refs=actor_train_metrics_refs,
-                                global_keys={"metrics", DIAGNOSTICS_META_KEY},
+                                data_refs=actor_train_metrics_refs
                             )
-                            diagnostic_payloads = actor_train_metrics.meta_info.pop(DIAGNOSTICS_META_KEY, [])
-                            for diagnostic in flatten_diagnostic_payloads(diagnostic_payloads):
-                                prefix = (
-                                    INFERENCE_LOG_PREFIX
-                                    if diagnostic.get("event") == "inference_teacher_forced_logprobs"
-                                    else LOG_PREFIX
-                                )
-                                logger.info(f"{prefix} " + json.dumps(diagnostic, ensure_ascii=False))
                             metrics_mgr.add_reduced_metrics(actor_train_metrics.meta_info.pop("metrics", {}))
 
                     if self.pipeline_config.adv_estimator == "gae":

@@ -67,7 +67,6 @@ class ActorWorker(Worker):
         global_step = data.meta_info.get("global_step", 0)
         is_offload_states = data.meta_info.get("is_offload_states", True)
         metrics = {}
-        self.prepare_train_step_diagnostics(global_step=global_step)
         self.logger.info(f"{self.worker_name} generate global step {global_step}")
 
         with state_offload_manger(
@@ -103,15 +102,9 @@ class ActorWorker(Worker):
             for batch_idx, backward_batch in tqdm(enumerate(dataloader),
                                                   desc=f"{self.worker_name} train global step {global_step}",
                                                   total=data.batch.batch_size[0] * self.pipeline_config.ppo_epochs // backward_batch_size):
-                backward_batch.meta_info["optimizer_batch_idx"] = batch_idx
                 pg_metrics = self.strategy.train_step(batch=backward_batch, loss_func=self.loss_func)
                 if self.worker_config.use_dynamic_batching_in_train or self.worker_config.use_sequence_packing:
                     pg_metrics = reduce_metrics(pg_metrics)
-                pg_metrics = self.log_optimizer_batch_diagnostics(
-                    global_step=global_step,
-                    batch_idx=batch_idx,
-                    metrics=pg_metrics,
-                )
                 append_to_dict(metrics, pg_metrics)
 
             metrics["actor/lr"] = self.strategy.scheduler.get_last_lr()[0]
@@ -130,22 +123,8 @@ class ActorWorker(Worker):
             data.to("cpu")
 
         self._logprobs_cache.clear()
-        output_meta_info = {"metrics": metrics}
-        output_meta_info.update(self.collect_train_step_meta_info())
-        output = DataProto(meta_info=output_meta_info)
+        output = DataProto(meta_info={"metrics": metrics})
         return output
-
-    def prepare_train_step_diagnostics(self, global_step: int) -> None:
-        """Hook for pipeline-specific diagnostic state initialized per train step."""
-        pass
-
-    def collect_train_step_meta_info(self) -> Dict:
-        """Return pipeline-specific metadata that should be sent back to the driver."""
-        return {}
-
-    def log_optimizer_batch_diagnostics(self, global_step: int, batch_idx: int, metrics: Dict) -> Dict:
-        """Hook for pipeline-specific diagnostics after one optimizer update."""
-        return metrics
 
     @register(dispatch_mode=Dispatch.DP_MP_DISPATCH_FIRST, trace=True, prefetch=False, to_remote=True)
     def compute_log_probs(self, data: DataProto):

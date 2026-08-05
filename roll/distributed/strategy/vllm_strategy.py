@@ -1,13 +1,10 @@
 import asyncio
 import copy
 import gc
-import math
 import os
 import random
 from collections import deque
-from collections.abc import Mapping, Sequence
 from typing import Dict, List, Optional
-
 from packaging.version import Version
 
 import torch
@@ -39,28 +36,6 @@ from roll.platforms import current_platform
 logger = get_logger()
 
 
-def _extract_chosen_prompt_logprobs(
-    prompt_token_ids: Sequence[int],
-    prompt_logprobs: Optional[Sequence[object]],
-) -> List[float]:
-    """Extract each prompt token's selected logprob while preserving positions."""
-    values = [math.nan] * len(prompt_token_ids)
-    if prompt_logprobs is None:
-        return values
-
-    for position, (token_id, candidates) in enumerate(zip(prompt_token_ids, prompt_logprobs)):
-        if not isinstance(candidates, Mapping):
-            continue
-        candidate = candidates.get(int(token_id))
-        if candidate is None:
-            continue
-        try:
-            values[position] = float(getattr(candidate, "logprob", candidate))
-        except (TypeError, ValueError):
-            continue
-    return values
-
-
 class VllmStrategy(InferenceStrategy):
     strategy_name = "vllm"
 
@@ -71,13 +46,7 @@ class VllmStrategy(InferenceStrategy):
         self._metrics_snapshots = deque(maxlen=3600)
         self._metrics_snapshot_interval = 1.0  # Snapshot every 1 second
         self._metrics_task = None
-        configured_requests = self.worker_config.strategy_args.strategy_config.get(
-            "rlvr_infer_diagnostic_requests",
-            1,
-        )
-        self._infer_diagnostic_requests_remaining = max(0, int(configured_requests))
-        self._infer_diagnostics_configured = self._infer_diagnostic_requests_remaining > 0
-        self._infer_diagnostic_claim_lock = asyncio.Lock()
+
 
     def get_free_port_for_rank(self) -> int:
         VLLM_PORT_START = 20000
@@ -102,16 +71,6 @@ class VllmStrategy(InferenceStrategy):
     async def initialize(self, model_provider):
         set_seed(seed=self.worker.pipeline_config.seed)
         vllm_config = copy.deepcopy(self.worker_config.strategy_args.strategy_config)
-        configured_requests = int(
-            vllm_config.pop(
-                "rlvr_infer_diagnostic_requests",
-                self._infer_diagnostic_requests_remaining,
-            )
-        )
-        if configured_requests < 0:
-            raise ValueError("rlvr_infer_diagnostic_requests must be non-negative")
-        self._infer_diagnostic_requests_remaining = configured_requests
-        self._infer_diagnostics_configured = configured_requests > 0
 
         # Apply GDN attention patch for mixed decode/spec-decode bug fix
         # This patches vLLM versions < v0.17.2 that lack the fix
@@ -162,16 +121,6 @@ class VllmStrategy(InferenceStrategy):
                 "max_num_batched_tokens": vllm_config.get("max_num_batched_tokens", 8192), # use default value of LLM class usage context
             }
         )
-        if (
-            self._infer_diagnostics_configured
-            and Version(vllm.__version__) < Version("0.9.0")
-            and vllm_config["enable_prefix_caching"]
-        ):
-            logger.warning(
-                "RLVR inference diagnostics cannot force a cold prefill on vLLM %s; "
-                "set enable_prefix_caching=false for an uncontaminated teacher-forced comparison",
-                vllm.__version__,
-            )
 
         self.is_lora = self.worker_config.model_args.lora_target is not None
         if self.is_lora:
@@ -219,58 +168,6 @@ class VllmStrategy(InferenceStrategy):
         vllm实现compute log probs在这里实现即可
         """
         pass
-
-    async def _claim_infer_diagnostic_request(self) -> bool:
-        """Atomically reserve one bounded teacher-forced diagnostic request."""
-        async with self._infer_diagnostic_claim_lock:
-            if self._infer_diagnostic_requests_remaining <= 0:
-                return False
-            self._infer_diagnostic_requests_remaining -= 1
-            return True
-
-    async def _score_teacher_forced_completion(
-        self,
-        *,
-        prompt_token_ids: Sequence[int],
-        completion_token_ids: Sequence[int],
-        request_id: str,
-        lora_request: Optional[LoRARequest],
-    ) -> List[float]:
-        """Score one fixed completion as prompt tokens inside vLLM."""
-        full_token_ids = [int(token_id) for token_id in (*prompt_token_ids, *completion_token_ids)]
-        scoring_params = SamplingParams(
-            max_tokens=1,
-            temperature=0.0,
-            prompt_logprobs=1,
-            output_kind=RequestOutputKind.FINAL_ONLY,
-        )
-        scoring_prompt = TokensPrompt(prompt_token_ids=full_token_ids)
-        if Version(vllm.__version__) >= Version("0.9.0"):
-            scoring_prompt["cache_salt"] = f"rlvr-infer-diag-{request_id}-cold-prefill"
-        result_generator = self.model.generate(
-            prompt=scoring_prompt,
-            sampling_params=scoring_params,
-            request_id=f"{request_id}:rlvr-infer-diag",
-            lora_request=lora_request,
-        )
-        scoring_output: Optional[RequestOutput] = None
-        async for result in result_generator:
-            scoring_output = result
-        if scoring_output is None:
-            raise RuntimeError("vLLM teacher-forced scoring returned no output")
-
-        chosen = _extract_chosen_prompt_logprobs(
-            full_token_ids,
-            getattr(scoring_output, "prompt_logprobs", None),
-        )
-        completion_start = len(prompt_token_ids)
-        completion_values = chosen[completion_start:]
-        if len(completion_values) != len(completion_token_ids):
-            raise RuntimeError(
-                "vLLM teacher-forced scoring length mismatch: "
-                f"expected={len(completion_token_ids)}, actual={len(completion_values)}"
-            )
-        return completion_values
 
     async def generate(self, batch: DataProto, generation_config) -> torch.Tensor:
         # Check if beam search is requested
@@ -448,37 +345,10 @@ class VllmStrategy(InferenceStrategy):
                     ]
                 )
 
-        teacher_forced_logprobs = None
-        if self._infer_diagnostics_configured:
-            teacher_forced_logprobs = [
-                [math.nan] * len(completion_output.token_ids) for completion_output in output.outputs
-            ]
-            can_score = (
-                "multi_modal_data" not in payload
-                and bool(output.outputs)
-                and bool(output.outputs[0].token_ids)
-                and output.outputs[0].finish_reason is not None
-            )
-            if can_score and await self._claim_infer_diagnostic_request():
-                try:
-                    teacher_forced_logprobs[0] = await self._score_teacher_forced_completion(
-                        prompt_token_ids=payload["input_ids"],
-                        completion_token_ids=output.outputs[0].token_ids,
-                        request_id=payload["rid"],
-                        lora_request=lora_request,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "RLVR inference diagnostic teacher-forced scoring failed for request %s: %s",
-                        payload["rid"],
-                        exc,
-                    )
-
         result = {
             "output_token_ids": output_token_ids,
             "finish_reasons": finish_reasons,
             "output_logprobs": logprobs,
-            "teacher_forced_output_logprobs": teacher_forced_logprobs,
         }
 
         # Add speculative metrics if available

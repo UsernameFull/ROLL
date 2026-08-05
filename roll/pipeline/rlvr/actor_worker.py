@@ -3,43 +3,10 @@ import torch
 
 from roll.distributed.scheduler.protocol import DataProto
 from roll.pipeline.base_worker import ActorWorker as BaseActorWorker
-from roll.pipeline.rlvr.logprob_diagnostics import (
-    DIAGNOSTICS_META_KEY,
-    PRIVATE_METRIC_PREFIX,
-    build_inference_logprob_diagnostics,
-    build_ratio_statistics,
-    build_token_logprob_records,
-    diagnostics_enabled,
-)
-from roll.utils.functionals import agg_loss, compute_approx_kl, masked_mean, reduce_metrics
+from roll.utils.functionals import masked_mean, agg_loss, compute_approx_kl
 from roll.utils.train_infer_corrections import compute_train_infer_correction
 
-
 class ActorWorker(BaseActorWorker):
-
-    def __init__(self, worker_config):
-        super().__init__(worker_config=worker_config)
-        self._logged_first_logprob_detail = False
-        self._logged_first_inference_detail = False
-        self._driver_logprob_diagnostics = []
-        self._first_update_probe_before = None
-
-    def prepare_train_step_diagnostics(self, global_step: int) -> None:
-        self._driver_logprob_diagnostics = []
-        self._first_update_probe_before = None
-
-    def consume_first_update_probe_before(self):
-        """Return and clear the first optimizer batch's pre-update logprobs."""
-        probe = self._first_update_probe_before
-        self._first_update_probe_before = None
-        return probe
-
-    def collect_train_step_meta_info(self) -> dict:
-        diagnostics = self._driver_logprob_diagnostics
-        self._driver_logprob_diagnostics = []
-        if not diagnostics:
-            return {}
-        return {DIAGNOSTICS_META_KEY: diagnostics}
 
     def loss_func(self, data: DataProto, output_tensor: torch.Tensor):
         """
@@ -136,69 +103,6 @@ class ActorWorker(BaseActorWorker):
         clipped_high = (ratio > 1 + pg_clip_high).float()
         clipped = (clipped_low + clipped_high).float()
 
-        global_step = data.meta_info.get("global_step", 0)
-        optimizer_batch_idx = data.meta_info.get("optimizer_batch_idx", -1)
-        log_diagnostics = diagnostics_enabled(global_step=global_step, rank=self.rank)
-        ratio_statistics = {}
-        if log_diagnostics:
-            try:
-                ratio_statistics = build_ratio_statistics(ratio, response_mask)
-            except Exception as exc:
-                self.logger.warning(f"RLVR logprob diagnostic failed to compute ratio statistics: {exc}")
-
-        if log_diagnostics and optimizer_batch_idx == 0 and self._first_update_probe_before is None:
-            self._first_update_probe_before = {
-                "log_probs": log_probs.detach().to(device="cpu", dtype=torch.float32),
-                "response_mask": response_mask.detach().to(device="cpu", dtype=torch.bool),
-            }
-
-        if log_diagnostics and optimizer_batch_idx == 0 and not self._logged_first_logprob_detail:
-            self._logged_first_logprob_detail = True
-            try:
-                records = build_token_logprob_records(
-                    input_ids=data.batch["input_ids"],
-                    response_mask=response_mask,
-                    current_log_probs=log_probs,
-                    old_log_probs=old_log_probs,
-                    infer_log_probs=infer_log_probs,
-                    ref_log_probs=ref_log_probs,
-                )
-                self._driver_logprob_diagnostics.append(
-                    {
-                        "event": "first_optimizer_batch_token_logprobs",
-                        "rank": self.rank,
-                        "global_step": global_step,
-                        "optimizer_batch_idx": optimizer_batch_idx,
-                        "records": records,
-                    }
-                )
-            except Exception as exc:
-                self.logger.warning(f"RLVR logprob diagnostic failed to format token logprobs: {exc}")
-
-        teacher_log_probs = data.batch.get("infer_teacher_logprobs")
-        if log_diagnostics and not self._logged_first_inference_detail and teacher_log_probs is not None:
-            try:
-                inference_diagnostics = build_inference_logprob_diagnostics(
-                    input_ids=data.batch["input_ids"],
-                    response_mask=response_mask,
-                    old_log_probs=old_log_probs,
-                    infer_log_probs=infer_log_probs,
-                    teacher_log_probs=teacher_log_probs,
-                )
-                if inference_diagnostics:
-                    self._logged_first_inference_detail = True
-                    self._driver_logprob_diagnostics.append(
-                        {
-                            "event": "inference_teacher_forced_logprobs",
-                            "rank": self.rank,
-                            "global_step": global_step,
-                            "optimizer_batch_idx": optimizer_batch_idx,
-                            **inference_diagnostics,
-                        }
-                    )
-            except Exception as exc:
-                self.logger.warning(f"RLVR inference diagnostic failed to compare logprobs: {exc}")
-
         if self.pipeline_config.use_kl_loss:
             total_loss = weighted_pg_loss + kl_loss * self.pipeline_config.kl_loss_coef
         else:
@@ -260,61 +164,7 @@ class ActorWorker(BaseActorWorker):
             **train_infer_metric,
         }
 
-        for key, value in ratio_statistics.items():
-            pg_metrics[f"{PRIVATE_METRIC_PREFIX}{key}"] = value
-
         return total_loss, pg_metrics
-
-    def log_optimizer_batch_diagnostics(self, global_step: int, batch_idx: int, metrics: dict) -> dict:
-        if not diagnostics_enabled(global_step=global_step, rank=self.rank):
-            return metrics
-
-        try:
-            reduced = reduce_metrics(dict(metrics))
-            lr = None
-            if self.strategy is not None and self.strategy.scheduler is not None:
-                lr = self.strategy.scheduler.get_last_lr()[0]
-
-            def metric(name):
-                value = reduced.get(name)
-                if isinstance(value, torch.Tensor):
-                    return value.detach().float().item()
-                if isinstance(value, np.generic):
-                    return value.item()
-                return value
-
-            payload = {
-                "event": "optimizer_batch_complete",
-                "rank": self.rank,
-                "global_step": global_step,
-                "optimizer_batch_idx": batch_idx,
-                "ratio_mean": metric(f"{PRIVATE_METRIC_PREFIX}ratio_mean"),
-                "ratio_min": metric("actor/ratio_min@min"),
-                "ratio_max": metric("actor/ratio_max@max"),
-                "ratio_p01_microbatch_mean": metric(f"{PRIVATE_METRIC_PREFIX}ratio_p01"),
-                "ratio_median_microbatch_mean": metric(f"{PRIVATE_METRIC_PREFIX}ratio_median"),
-                "ratio_p99_microbatch_mean": metric(f"{PRIVATE_METRIC_PREFIX}ratio_p99"),
-                "ratio_nonfinite_fraction_microbatch_mean": metric(
-                    f"{PRIVATE_METRIC_PREFIX}ratio_nonfinite_fraction"
-                ),
-                "approxkl": metric("actor/approxkl@sum"),
-                "policykl": metric("actor/policykl@sum"),
-                "clipfrac_low": metric("actor/ppo_ratio_low_clipfrac@sum"),
-                "clipfrac_high": metric("actor/ppo_ratio_high_clipfrac@sum"),
-                "clipfrac_total": metric("actor/ppo_ratio_clipfrac@sum"),
-                "grad_norm": metric(f"{self.worker_config.name}/grad_norm"),
-                "lr_after_update": float(lr) if lr is not None else None,
-            }
-            pop_update_probe = getattr(self.strategy, "pop_update_probe_diagnostics", None)
-            if pop_update_probe is not None:
-                update_probe = pop_update_probe()
-                if update_probe:
-                    payload.update(update_probe)
-            self._driver_logprob_diagnostics.append(payload)
-        except Exception as exc:
-            self.logger.warning(f"RLVR logprob diagnostic failed to format optimizer batch metrics: {exc}")
-
-        return {key: value for key, value in metrics.items() if not key.startswith(PRIVATE_METRIC_PREFIX)}
 
     def compute_sample_weights(self, data: DataProto, response_mask: torch.Tensor):
         """

@@ -69,8 +69,12 @@ from roll.third_party.megatron.router_replay_utils import (
 )
 from roll.third_party.megatron.tensor_parallel import vocab_parallel_entropy
 from roll.third_party.megatron.update_diagnostics import (
+    FP8_UPDATE_SWEEP_ALPHAS,
+    TensorSnapshot,
+    apply_scaled_tensor_update,
     build_masked_logprob_delta_statistics,
     build_tensor_update_statistics,
+    iter_leaf_optimizers,
     iter_named_model_parameters,
     iter_optimizer_master_parameters,
     should_run_fp8_first_update_diagnostics,
@@ -1534,6 +1538,277 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                 diagnostics.setdefault("errors", {})[name] = f"{type(exc).__name__}: {exc}"
         return diagnostics
 
+    @torch.no_grad()
+    def _sync_optimizer_master_to_forward_parameters(self) -> None:
+        """Copy FP32 master shards to forward parameters using Megatron's normal sync path."""
+        leaf_optimizers = list(iter_leaf_optimizers(self.optimizer))
+        if not leaf_optimizers:
+            raise RuntimeError("Megatron optimizer exposes no leaf optimizers")
+
+        model_chunks = []
+        seen_model_chunks: set[int] = set()
+        for optimizer in leaf_optimizers:
+            config = getattr(optimizer, "config", None)
+            reuse_grad_buffer = bool(getattr(config, "reuse_grad_buf_for_mxfp8_param_ag", False))
+            method_name = (
+                "_copy_main_params_to_param_buffer"
+                if reuse_grad_buffer
+                else "_copy_main_params_to_model_params"
+            )
+            copy_method = getattr(optimizer, method_name, None)
+            if not callable(copy_method):
+                raise TypeError(
+                    f"Unsupported Megatron optimizer {type(optimizer)!r}: missing {method_name}()"
+                )
+            copy_method()
+
+            ddp_config = getattr(optimizer, "ddp_config", None)
+            if ddp_config is None:
+                continue
+            if getattr(ddp_config, "overlap_param_gather", False):
+                raise RuntimeError("FP8 scaled-update diagnostics do not support overlap_param_gather")
+            for model_chunk in getattr(optimizer, "model_chunks", ()):
+                if id(model_chunk) in seen_model_chunks:
+                    continue
+                seen_model_chunks.add(id(model_chunk))
+                model_chunks.append(model_chunk)
+
+        for model_chunk in model_chunks:
+            start_param_sync = getattr(model_chunk, "start_param_sync", None)
+            if not callable(start_param_sync):
+                raise TypeError(f"Megatron model chunk {type(model_chunk)!r} has no start_param_sync()")
+            start_param_sync()
+
+    def _all_ranks_ready_for_scaled_update_sweep(self, ready: bool) -> bool:
+        """Return whether every training rank has the snapshots required by the sweep."""
+        parameter = next(
+            parameter
+            for model in self.models_unwrapped
+            for parameter in model.parameters()
+            if parameter.requires_grad
+        )
+        ready_tensor = torch.tensor(int(ready), dtype=torch.int32, device=parameter.device)
+        if dist.is_initialized():
+            dist.all_reduce(ready_tensor, op=dist.ReduceOp.MIN)
+        return bool(ready_tensor.item())
+
+    @torch.no_grad()
+    def _apply_scaled_master_update(
+        self,
+        master_before: TensorSnapshot,
+        master_after: TensorSnapshot,
+        *,
+        alpha: float,
+    ) -> None:
+        """Apply one FP32-master interpolation point and synchronize forward parameters."""
+        apply_scaled_tensor_update(
+            master_before,
+            master_after,
+            iter_optimizer_master_parameters(self.optimizer),
+            alpha=alpha,
+        )
+        self._sync_optimizer_master_to_forward_parameters()
+        current_platform.synchronize()
+
+    def _build_scaled_update_logprob_point(
+        self,
+        probe_batch: DataProto,
+        *,
+        alpha: float,
+        native_before: torch.Tensor | None,
+        bf16_before: torch.Tensor | None,
+        native_current: torch.Tensor | None,
+        bf16_current: torch.Tensor | None,
+        errors: dict[str, str],
+    ) -> dict[str, object]:
+        """Build masked logprob comparisons for one scaled-update point."""
+        point: dict[str, object] = {"alpha": alpha}
+        if errors:
+            point["errors"] = errors
+        if not self.worker.rank_info.is_pipeline_last_stage or self.worker.rank_info.tp_rank != 0:
+            return point
+
+        try:
+            probe_mask = probe_batch.batch["response_mask"][:, 1:].detach().to(device="cpu", dtype=torch.bool)
+        except Exception as exc:
+            point.setdefault("errors", {})["response_mask"] = f"{type(exc).__name__}: {exc}"
+            return point
+
+        comparisons = {
+            "native_vs_alpha0": (native_current, native_before),
+            "bf16_vs_alpha0": (bf16_current, bf16_before),
+            "bf16_vs_native_at_alpha": (bf16_current, native_current),
+        }
+        for name, (after, before) in comparisons.items():
+            if after is None or before is None:
+                continue
+            try:
+                point[name] = build_masked_logprob_delta_statistics(after, before, probe_mask)
+            except Exception as exc:
+                point.setdefault("errors", {})[name] = f"{type(exc).__name__}: {exc}"
+
+        for precision, comparison_name in (
+            ("native", "native_vs_alpha0"),
+            ("bf16", "bf16_vs_alpha0"),
+        ):
+            statistics = point.get(comparison_name)
+            half_delta_sq_mean = (
+                statistics.get("half_delta_sq_mean") if isinstance(statistics, dict) else None
+            )
+            point[f"{precision}_kl_over_alpha_sq"] = (
+                half_delta_sq_mean / (alpha * alpha)
+                if half_delta_sq_mean is not None and alpha > 0.0
+                else None
+            )
+        return point
+
+    def _verify_scaled_update_restoration(
+        self,
+        *,
+        master_after: TensorSnapshot,
+        forward_after: TensorSnapshot,
+    ) -> dict[str, object]:
+        """Require exact restoration of master and forward parameters after a sweep."""
+        restoration: dict[str, object] = {}
+        for name, snapshot, master in (
+            ("fp32_master", master_after, True),
+            ("bf16_forward", forward_after, False),
+        ):
+            local_statistics, local_error = self._build_local_update_statistics(
+                snapshot,
+                master=master,
+                learning_rate=None,
+            )
+            statistics, reduce_error = self._reduce_update_statistics(
+                local_statistics,
+                master=master,
+                learning_rate=None,
+            )
+            error = local_error or reduce_error
+            if error is not None or statistics is None:
+                raise RuntimeError(f"Unable to verify {name} restoration: {error}")
+            if (
+                statistics["changed_numel"] != 0
+                or statistics["update_sq_sum"] != 0.0
+                or statistics["update_abs_max"] != 0.0
+            ):
+                raise RuntimeError(
+                    f"{name} restoration mismatch: changed_numel={statistics['changed_numel']}, "
+                    f"update_sq_sum={statistics['update_sq_sum']}, "
+                    f"update_abs_max={statistics['update_abs_max']}"
+                )
+            restoration[name] = statistics
+        restoration["verified_exact"] = True
+        return restoration
+
+    def _run_scaled_update_sweep(
+        self,
+        probe_batch: DataProto,
+        *,
+        learning_rate_applied: float | None,
+        master_before: TensorSnapshot,
+        master_after: TensorSnapshot,
+        forward_before: TensorSnapshot,
+        forward_after: TensorSnapshot,
+        native_before: torch.Tensor | None,
+        bf16_before: torch.Tensor | None,
+    ) -> tuple[dict[str, object], torch.Tensor | None, torch.Tensor | None]:
+        """Replay scaled FP32-master updates and restore the real optimizer result exactly."""
+        points: list[dict[str, object]] = []
+        payload: dict[str, object] = {
+            "basis": "fp32_master_delta",
+            "alphas": list(FP8_UPDATE_SWEEP_ALPHAS),
+            "same_probe_batch": True,
+            "comparison_baseline": "alpha0_replay_after_optimizer",
+            "points": points,
+        }
+        native_alpha1 = None
+        bf16_alpha1 = None
+        native_sweep_baseline = native_before
+        bf16_sweep_baseline = bf16_before
+        sweep_error = None
+        try:
+            for alpha in FP8_UPDATE_SWEEP_ALPHAS:
+                self._apply_scaled_master_update(master_before, master_after, alpha=alpha)
+                effective_learning_rate = (
+                    learning_rate_applied * alpha if learning_rate_applied is not None else None
+                )
+                local_master, local_master_error = self._build_local_update_statistics(
+                    master_before,
+                    master=True,
+                    learning_rate=effective_learning_rate,
+                )
+                master_update, master_reduce_error = self._reduce_update_statistics(
+                    local_master,
+                    master=True,
+                    learning_rate=effective_learning_rate,
+                )
+                local_forward, local_forward_error = self._build_local_update_statistics(
+                    forward_before,
+                    master=False,
+                    learning_rate=effective_learning_rate,
+                )
+                forward_update, forward_reduce_error = self._reduce_update_statistics(
+                    local_forward,
+                    master=False,
+                    learning_rate=effective_learning_rate,
+                )
+                native_current, native_error = self._run_logprob_probe(probe_batch, disable_fp8=False)
+                bf16_current, bf16_error = self._run_logprob_probe(probe_batch, disable_fp8=True)
+                point_errors = {
+                    name: error
+                    for name, error in {
+                        "fp32_master_update": local_master_error or master_reduce_error,
+                        "bf16_forward_update": local_forward_error or forward_reduce_error,
+                        "native": native_error,
+                        "bf16": bf16_error,
+                    }.items()
+                    if error is not None
+                }
+                point = self._build_scaled_update_logprob_point(
+                    probe_batch,
+                    alpha=alpha,
+                    native_before=native_sweep_baseline,
+                    bf16_before=bf16_sweep_baseline,
+                    native_current=native_current,
+                    bf16_current=bf16_current,
+                    errors=point_errors,
+                )
+                point["effective_learning_rate"] = effective_learning_rate
+                point["fp32_master_update"] = master_update
+                point["bf16_forward_update"] = forward_update
+                points.append(point)
+                if alpha == 0.0:
+                    payload["alpha0_replay_vs_preupdate"] = {
+                        "native": point.get("native_vs_alpha0"),
+                        "bf16": point.get("bf16_vs_alpha0"),
+                    }
+                    if native_current is not None:
+                        native_sweep_baseline = native_current
+                    if bf16_current is not None:
+                        bf16_sweep_baseline = bf16_current
+                if alpha == 1.0:
+                    native_alpha1 = native_current
+                    bf16_alpha1 = bf16_current
+        except Exception as exc:
+            logger.exception(f"Megatron FP8 scaled-update sweep failed: {exc}")
+            sweep_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            try:
+                self._apply_scaled_master_update(master_after, master_after, alpha=1.0)
+                payload["restoration"] = self._verify_scaled_update_restoration(
+                    master_after=master_after,
+                    forward_after=forward_after,
+                )
+            except Exception as restore_exc:
+                raise RuntimeError(
+                    "Megatron FP8 scaled-update diagnostics failed to restore the real optimizer result"
+                ) from restore_exc
+
+        if sweep_error is not None:
+            payload["error"] = sweep_error
+        return payload, native_alpha1, bf16_alpha1
+
     def train_step(self, batch: DataProto, loss_func: Callable):
         self.model.train()
         self._update_probe_diagnostics = None
@@ -1628,6 +1903,10 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         master_update = None
         forward_update_error = None
         master_update_error = None
+        forward_after_snapshot = None
+        master_after_snapshot = None
+        forward_after_snapshot_error = None
+        master_after_snapshot_error = None
         if run_update_probe:
             local_forward_update, local_forward_error = self._build_local_update_statistics(
                 forward_snapshot,
@@ -1656,9 +1935,40 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         bf16_after = None
         native_after_error = None
         bf16_after_error = None
+        scaled_update_sweep = None
         if run_update_probe and update_successful:
-            native_after, native_after_error = self._run_logprob_probe(probe_batch, disable_fp8=False)
-            bf16_after, bf16_after_error = self._run_logprob_probe(probe_batch, disable_fp8=True)
+            forward_after_snapshot, forward_after_snapshot_error = self._snapshot_update_parameters(master=False)
+            master_after_snapshot, master_after_snapshot_error = self._snapshot_update_parameters(master=True)
+            local_sweep_ready = all(
+                snapshot is not None
+                for snapshot in (
+                    forward_snapshot,
+                    master_snapshot,
+                    forward_after_snapshot,
+                    master_after_snapshot,
+                )
+            )
+            if self._all_ranks_ready_for_scaled_update_sweep(local_sweep_ready):
+                scaled_update_sweep, native_after, bf16_after = self._run_scaled_update_sweep(
+                    probe_batch,
+                    learning_rate_applied=learning_rate_applied,
+                    master_before=master_snapshot,
+                    master_after=master_after_snapshot,
+                    forward_before=forward_snapshot,
+                    forward_after=forward_after_snapshot,
+                    native_before=native_before,
+                    bf16_before=bf16_before,
+                )
+            else:
+                scaled_update_sweep = {
+                    "basis": "fp32_master_delta",
+                    "alphas": list(FP8_UPDATE_SWEEP_ALPHAS),
+                    "skipped": "required snapshot unavailable on one or more training ranks",
+                }
+            if native_after is None:
+                native_after, native_after_error = self._run_logprob_probe(probe_batch, disable_fp8=False)
+            if bf16_after is None:
+                bf16_after, bf16_after_error = self._run_logprob_probe(probe_batch, disable_fp8=True)
 
         if is_offload_optimizer_states_in_train_step:
             self.offload_states(include=[OffloadStateType.optimizer_states], non_blocking=True)
@@ -1676,6 +1986,8 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                     "fp32_master_snapshot": master_snapshot_error,
                     "bf16_forward_update": forward_update_error,
                     "fp32_master_update": master_update_error,
+                    "bf16_forward_after_snapshot": forward_after_snapshot_error,
+                    "fp32_master_after_snapshot": master_after_snapshot_error,
                     "native_before": native_before_error,
                     "native_after": native_after_error,
                     "bf16_before": bf16_before_error,
@@ -1713,6 +2025,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                     "learning_rate_applied": learning_rate_applied,
                     "bf16_forward_update": forward_update,
                     "fp32_master_update": master_update,
+                    "scaled_update_sweep": scaled_update_sweep,
                     "logprob": self._build_logprob_update_diagnostics(
                         probe_batch,
                         native_before=native_before,
@@ -1723,7 +2036,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                     ),
                     "errors": errors,
                 }
-            del forward_snapshot, master_snapshot
+            del forward_snapshot, master_snapshot, forward_after_snapshot, master_after_snapshot
             del native_before, native_after, bf16_before, bf16_after
             del probe_batch
             current_platform.empty_cache()

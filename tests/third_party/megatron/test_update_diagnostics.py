@@ -6,9 +6,11 @@ import torch
 from torch import nn
 
 from roll.third_party.megatron.update_diagnostics import (
+    apply_scaled_tensor_update,
     build_masked_logprob_delta_statistics,
     build_tensor_update_statistics,
     flatten_fp8_update_diagnostics,
+    iter_leaf_optimizers,
     iter_named_model_parameters,
     iter_optimizer_master_parameters,
     should_run_fp8_first_update_diagnostics,
@@ -109,6 +111,80 @@ def test_named_model_parameter_snapshot_is_independent_and_cpu_backed() -> None:
 
     assert snapshot["model0.weight"].device.type == "cpu"
     assert torch.equal(snapshot["model0.weight"], original)
+
+
+@pytest.mark.parametrize(
+    ("alpha", "expected"),
+    [
+        (0.0, [1.0, 2.0]),
+        (0.25, [2.0, 4.0]),
+        (1.0, [5.0, 10.0]),
+    ],
+)
+def test_apply_scaled_tensor_update_interpolates_fp32_master_exactly(
+    alpha: float,
+    expected: list[float],
+) -> None:
+    current = torch.full((2,), -1.0, dtype=torch.float32)
+    before = {"master": torch.tensor([1.0, 2.0], dtype=torch.float32)}
+    after = {"master": torch.tensor([5.0, 10.0], dtype=torch.float32)}
+    before_original = before["master"].clone()
+    after_original = after["master"].clone()
+
+    apply_scaled_tensor_update(before, after, [("master", current)], alpha=alpha)
+
+    assert torch.equal(current, torch.tensor(expected, dtype=torch.float32))
+    assert torch.equal(before["master"], before_original)
+    assert torch.equal(after["master"], after_original)
+
+
+def test_apply_scaled_tensor_update_restores_endpoint_bitwise() -> None:
+    after_tensor = torch.tensor([1.0000001192092896, -3.25], dtype=torch.float32)
+    current = torch.zeros_like(after_tensor)
+    before = {"master": torch.tensor([1.0, -3.0], dtype=torch.float32)}
+    after = {"master": after_tensor.clone()}
+
+    apply_scaled_tensor_update(before, after, [("master", current)], alpha=1.0)
+
+    assert torch.equal(current, after_tensor)
+
+
+def test_apply_scaled_tensor_update_rejects_invalid_alpha_without_mutation() -> None:
+    current = torch.tensor([7.0], dtype=torch.float32)
+    snapshot = {"master": torch.tensor([1.0], dtype=torch.float32)}
+
+    with pytest.raises(ValueError, match="alpha must be in"):
+        apply_scaled_tensor_update(snapshot, snapshot, [("master", current)], alpha=1.5)
+
+    assert torch.equal(current, torch.tensor([7.0], dtype=torch.float32))
+
+
+def test_apply_scaled_tensor_update_validates_all_tensors_before_mutation() -> None:
+    first = torch.tensor([7.0], dtype=torch.float32)
+    second = torch.tensor([8.0], dtype=torch.float32)
+    before = {
+        "first": torch.tensor([1.0], dtype=torch.float32),
+        "second": torch.tensor([2.0], dtype=torch.float32),
+    }
+    after = {name: tensor.clone() for name, tensor in before.items()}
+
+    with pytest.raises(ValueError, match="shape changed"):
+        apply_scaled_tensor_update(
+            before,
+            after,
+            [("first", first), ("second", second.repeat(2))],
+            alpha=0.5,
+        )
+
+    assert torch.equal(first, torch.tensor([7.0], dtype=torch.float32))
+
+
+def test_iter_leaf_optimizers_flattens_nested_chains_in_order() -> None:
+    first = SimpleNamespace(name="first")
+    second = SimpleNamespace(name="second")
+    nested = FakeChainedOptimizer(first, FakeChainedOptimizer(second))
+
+    assert list(iter_leaf_optimizers(nested)) == [first, second]
 
 
 def test_build_masked_logprob_delta_statistics_reports_ppo_movement() -> None:

@@ -10,6 +10,16 @@ from torch import nn
 
 FP8_UPDATE_DIAGNOSTICS_META_KEY = "fp8_first_update_diagnostics"
 FP8_UPDATE_LOG_PREFIX = "[RLVR_FP8_UPDATE_DIAG]"
+FP8_UPDATE_SWEEP_ALPHAS = (
+    0.0,
+    1.0 / 64.0,
+    1.0 / 32.0,
+    1.0 / 16.0,
+    1.0 / 8.0,
+    1.0 / 4.0,
+    1.0 / 2.0,
+    1.0,
+)
 
 TensorSnapshot: TypeAlias = dict[str, torch.Tensor]
 NamedTensors: TypeAlias = Iterable[tuple[str, torch.Tensor]]
@@ -117,6 +127,67 @@ def snapshot_named_tensors(named_tensors: NamedTensors) -> TensorSnapshot:
             raise ValueError(f"Duplicate tensor name in diagnostic snapshot: {name}")
         snapshot[name] = tensor.detach().to(device="cpu").clone()
     return snapshot
+
+
+@torch.no_grad()
+def apply_scaled_tensor_update(
+    before: Mapping[str, torch.Tensor],
+    after: Mapping[str, torch.Tensor],
+    current_tensors: NamedTensors,
+    *,
+    alpha: float,
+) -> None:
+    """Set tensors to ``before + alpha * (after - before)`` from CPU snapshots."""
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError(f"alpha must be in [0, 1], got {alpha}")
+    if set(before) != set(after):
+        missing_after = sorted(set(before) - set(after))
+        missing_before = sorted(set(after) - set(before))
+        raise ValueError(
+            "Snapshot names differ: "
+            f"missing_after={missing_after[:3]}, missing_before={missing_before[:3]}"
+        )
+
+    current_items = list(current_tensors)
+    current_names: set[str] = set()
+    for name, current in current_items:
+        if name in current_names:
+            raise ValueError(f"Duplicate current tensor name: {name}")
+        if name not in before:
+            raise ValueError(f"Current tensor is missing from snapshots: {name}")
+        current_names.add(name)
+
+        before_tensor = before[name]
+        after_tensor = after[name]
+        if before_tensor.device.type != "cpu" or after_tensor.device.type != "cpu":
+            raise ValueError(f"Diagnostic snapshots must reside on CPU: {name}")
+        if before_tensor.shape != after_tensor.shape or before_tensor.shape != current.shape:
+            raise ValueError(
+                f"Tensor shape changed for {name}: before={tuple(before_tensor.shape)}, "
+                f"after={tuple(after_tensor.shape)}, current={tuple(current.shape)}"
+            )
+        if before_tensor.dtype != after_tensor.dtype or before_tensor.dtype != current.dtype:
+            raise TypeError(
+                f"Tensor dtype changed for {name}: before={before_tensor.dtype}, "
+                f"after={after_tensor.dtype}, current={current.dtype}"
+            )
+    missing_names = set(before) - current_names
+    if missing_names:
+        preview = ", ".join(sorted(missing_names)[:3])
+        raise ValueError(f"Snapshot tensors are missing from current values: {preview}")
+
+    for name, current in current_items:
+        _apply_scaled_tensor_update(before[name], after[name], current, alpha=alpha)
+
+
+def iter_leaf_optimizers(optimizer: object) -> Iterator[object]:
+    """Yield non-chained Megatron optimizers in stable order."""
+    chained = getattr(optimizer, "chained_optimizers", None)
+    if chained is None:
+        yield optimizer
+        return
+    for sub_optimizer in chained:
+        yield from iter_leaf_optimizers(sub_optimizer)
 
 
 def build_tensor_update_statistics(
@@ -235,6 +306,29 @@ def build_masked_logprob_delta_statistics(
             (nonfinite_token_count + (~ratio_is_finite).double().sum().item()) / token_count
         ),
     }
+
+
+@torch.no_grad()
+def _apply_scaled_tensor_update(
+    before: torch.Tensor,
+    after: torch.Tensor,
+    current: torch.Tensor,
+    *,
+    alpha: float,
+) -> None:
+    before_flat = before.reshape(-1)
+    after_flat = after.reshape(-1)
+    current_flat = current.detach().reshape(-1)
+    source = before_flat if alpha == 0.0 else after_flat if alpha == 1.0 else None
+    for start in range(0, current.numel(), _STATISTICS_CHUNK_SIZE):
+        end = min(start + _STATISTICS_CHUNK_SIZE, current.numel())
+        if source is not None:
+            target = source[start:end].to(device=current.device)
+        else:
+            target = before_flat[start:end].clone()
+            target.lerp_(after_flat[start:end], alpha)
+            target = target.to(device=current.device)
+        current_flat[start:end].copy_(target)
 
 
 def _build_raw_update_statistics(before: torch.Tensor, current: torch.Tensor) -> dict[str, int | float]:

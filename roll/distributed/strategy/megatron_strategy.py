@@ -1727,6 +1727,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             "alphas": list(FP8_UPDATE_SWEEP_ALPHAS),
             "same_probe_batch": True,
             "comparison_baseline": "alpha0_replay_after_optimizer",
+            "alpha1_probe_calls_completed": False,
             "points": points,
         }
         native_alpha1 = None
@@ -1736,6 +1737,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         sweep_error = None
         try:
             for alpha in FP8_UPDATE_SWEEP_ALPHAS:
+                logger.info(f"Megatron FP8 scaled-update sweep alpha={alpha:.8g} start")
                 self._apply_scaled_master_update(master_before, master_after, alpha=alpha)
                 effective_learning_rate = (
                     learning_rate_applied * alpha if learning_rate_applied is not None else None
@@ -1795,8 +1797,13 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                     if bf16_current is not None:
                         bf16_sweep_baseline = bf16_current
                 if alpha == 1.0:
+                    # Both probe calls are collective operations even though only the output TP
+                    # rank receives logprobs. Record call completion separately from local data
+                    # availability so non-output ranks do not enter unmatched fallback probes.
+                    payload["alpha1_probe_calls_completed"] = True
                     native_alpha1 = native_current
                     bf16_alpha1 = bf16_current
+                logger.info(f"Megatron FP8 scaled-update sweep alpha={alpha:.8g} complete")
         except Exception as exc:
             logger.exception(f"Megatron FP8 scaled-update sweep failed: {exc}")
             sweep_error = f"{type(exc).__name__}: {exc}"
@@ -1973,9 +1980,13 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                     "alphas": list(FP8_UPDATE_SWEEP_ALPHAS),
                     "skipped": "required snapshot unavailable on one or more training ranks",
                 }
-            if native_after is None:
+            alpha1_probe_calls_completed = bool(
+                scaled_update_sweep.get("alpha1_probe_calls_completed", False)
+            )
+            if not alpha1_probe_calls_completed:
+                # All ranks must make the same forward-probe calls. A None result is expected on
+                # non-output TP/PP ranks and must never be used as the collective control signal.
                 native_after, native_after_error = self._run_logprob_probe(probe_batch, disable_fp8=False)
-            if bf16_after is None:
                 bf16_after, bf16_after_error = self._run_logprob_probe(probe_batch, disable_fp8=True)
 
         if is_offload_optimizer_states_in_train_step:

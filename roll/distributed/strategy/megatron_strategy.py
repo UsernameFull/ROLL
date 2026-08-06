@@ -1169,6 +1169,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         self.processor = None
         self._validate_access_integrity = True
         self._update_probe_diagnostics = None
+        self._stop_after_update_probe = False
 
         # 新增：Router Replay 配置（用于 R2 和 R3 的 REPLAY）
         # 注意：这里会覆盖父类的配置，因为训练阶段的行为不同
@@ -1306,6 +1307,12 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         diagnostics = self._update_probe_diagnostics
         self._update_probe_diagnostics = None
         return diagnostics
+
+    def consume_update_probe_stop_request(self) -> bool:
+        """Return whether this rank must stop after the intrusive FP8 update probe."""
+        stop_requested = self._stop_after_update_probe
+        self._stop_after_update_probe = False
+        return stop_requested
 
     def _forward_logprob_probe(self, data: DataProto, output_tensor: torch.Tensor):
         log_probs = self.op_compute_log_probs(
@@ -1812,6 +1819,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
     def train_step(self, batch: DataProto, loss_func: Callable):
         self.model.train()
         self._update_probe_diagnostics = None
+        self._stop_after_update_probe = False
 
         if self.enable_router_replay:
             assert "routed_experts" in batch.batch
@@ -2012,6 +2020,8 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                         errors[name] = "probe returned no logprobs on the emitting rank"
                 self._update_probe_diagnostics = {
                     "event": "megatron_fp8_first_optimizer_update",
+                    "execution_mode": "diagnostic_only_single_optimizer_batch",
+                    "training_continuation": "stopped_before_next_backward",
                     "rank": self.worker.rank,
                     "dp_rank": self.worker.rank_info.dp_rank,
                     "tp_rank": self.worker.rank_info.tp_rank,
@@ -2036,6 +2046,12 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
                     ),
                     "errors": errors,
                 }
+            # The alpha sweep repeatedly rewrites parameters and executes native-FP8/BF16
+            # forwards. Parameter restoration is verified above, but Transformer Engine also
+            # owns mutable FP8 metadata and weight caches that are not part of the optimizer or
+            # model parameter snapshots. Do not feed that diagnostic runtime state into another
+            # backward pass. This flag is set on every rank, not just the rank that emits JSON.
+            self._stop_after_update_probe = True
             del forward_snapshot, master_snapshot, forward_after_snapshot, master_after_snapshot
             del native_before, native_after, bf16_before, bf16_after
             del probe_batch

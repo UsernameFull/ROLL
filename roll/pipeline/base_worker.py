@@ -70,6 +70,8 @@ class ActorWorker(Worker):
         is_offload_states = data.meta_info.get("is_offload_states", True)
         metrics = {}
         self._fp8_update_diagnostics = []
+        completed_backward_steps = 0
+        stopped_after_fp8_update_diagnostics = False
         self.logger.info(f"{self.worker_name} generate global step {global_step}")
 
         with state_offload_manger(
@@ -107,6 +109,7 @@ class ActorWorker(Worker):
                                                   total=data.batch.batch_size[0] * self.pipeline_config.ppo_epochs // backward_batch_size):
                 backward_batch.meta_info["optimizer_batch_idx"] = batch_idx
                 pg_metrics = self.strategy.train_step(batch=backward_batch, loss_func=self.loss_func)
+                completed_backward_steps += 1
                 pop_diagnostics = getattr(self.strategy, "pop_update_probe_diagnostics", None)
                 if callable(pop_diagnostics):
                     diagnostics = pop_diagnostics()
@@ -116,9 +119,16 @@ class ActorWorker(Worker):
                     pg_metrics = reduce_metrics(pg_metrics)
                 append_to_dict(metrics, pg_metrics)
 
+                consume_stop_request = getattr(self.strategy, "consume_update_probe_stop_request", None)
+                if callable(consume_stop_request) and consume_stop_request():
+                    stopped_after_fp8_update_diagnostics = True
+                    break
+
             metrics["actor/lr"] = self.strategy.scheduler.get_last_lr()[0]
-            backward_steps = data.batch.batch_size[0] * self.pipeline_config.ppo_epochs // backward_batch_size
+            backward_steps = completed_backward_steps
             metrics["actor/backward_steps"] = backward_steps
+            if stopped_after_fp8_update_diagnostics:
+                metrics["actor/fp8_update_diagnostic_only"] = 1.0
 
             # Divide @sum metrics by backward_steps to get average
             for key in list(metrics.keys()):

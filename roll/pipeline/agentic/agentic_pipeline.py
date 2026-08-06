@@ -27,11 +27,6 @@ from roll.pipeline.agentic.utils import (
     get_agentic_response_level_mask,
 )
 from roll.pipeline.base_pipeline import BasePipeline
-from roll.third_party.megatron.update_diagnostics import (
-    FP8_UPDATE_DIAGNOSTICS_META_KEY,
-    FP8_UPDATE_LOG_PREFIX,
-    flatten_fp8_update_diagnostics,
-)
 from roll.utils.constants import RAY_NAMESPACE
 from roll.utils.dynamic_batching import dynamic_batching_shard
 from roll.utils.functionals import (
@@ -545,18 +540,7 @@ class AgenticPipeline(BasePipeline):
                                 )
                                 metrics.update(dynamic_batching_metrics)
                             actor_train_metrics_refs = self.actor_train.train_step(batch, blocking=False)
-                            actor_train_metrics: DataProto = DataProto.materialize_concat(
-                                data_refs=actor_train_metrics_refs,
-                                global_keys={"metrics", FP8_UPDATE_DIAGNOSTICS_META_KEY},
-                            )
-                            diagnostic_payloads = actor_train_metrics.meta_info.pop(
-                                FP8_UPDATE_DIAGNOSTICS_META_KEY, []
-                            )
-                            for diagnostic in flatten_fp8_update_diagnostics(diagnostic_payloads):
-                                logger.info(
-                                    f"{FP8_UPDATE_LOG_PREFIX} "
-                                    + json.dumps(diagnostic, ensure_ascii=False)
-                                )
+                            actor_train_metrics: DataProto = DataProto.materialize_concat(data_refs=actor_train_metrics_refs)
                             metrics.update(reduce_metrics(actor_train_metrics.meta_info.pop("metrics", {})))
 
                         if self.pipeline_config.adv_estimator == "gae":

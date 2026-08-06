@@ -32,11 +32,6 @@ from roll.pipeline.base_pipeline import BasePipeline
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.pipeline.rlvr.rlvr_pipeline import update_dataset_domain
 from roll.pipeline.rlvr.utils import dump_rollout_to_specific_path
-from roll.third_party.megatron.update_diagnostics import (
-    FP8_UPDATE_DIAGNOSTICS_META_KEY,
-    FP8_UPDATE_LOG_PREFIX,
-    flatten_fp8_update_diagnostics,
-)
 from roll.utils.functionals import (
     RunningMoments,
     agg_loss,
@@ -593,17 +588,8 @@ class RLVRVLMPipeline(BasePipeline):
                             # update actor
                             actor_train_metrics_refs = self.actor_train.train_step(batch, blocking=False)
                             actor_train_metrics: DataProto = DataProto.materialize_concat(
-                                data_refs=actor_train_metrics_refs,
-                                global_keys={"metrics", FP8_UPDATE_DIAGNOSTICS_META_KEY},
+                                data_refs=actor_train_metrics_refs
                             )
-                            diagnostic_payloads = actor_train_metrics.meta_info.pop(
-                                FP8_UPDATE_DIAGNOSTICS_META_KEY, []
-                            )
-                            for diagnostic in flatten_fp8_update_diagnostics(diagnostic_payloads):
-                                logger.info(
-                                    f"{FP8_UPDATE_LOG_PREFIX} "
-                                    + json.dumps(diagnostic, ensure_ascii=False)
-                                )
                             metrics_mgr.add_reduced_metrics(actor_train_metrics.meta_info.pop("metrics", {}))
 
                     if self.pipeline_config.adv_estimator == "gae":

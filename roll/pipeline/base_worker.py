@@ -21,7 +21,6 @@ from roll.models.model_providers import (
     default_value_model_provider,
 )
 from roll.platforms import current_platform
-from roll.third_party.megatron.update_diagnostics import FP8_UPDATE_DIAGNOSTICS_META_KEY
 from roll.utils.checkpoint_manager import download_model, get_latest_ckpt
 from roll.utils.context_managers import state_offload_manger, log_gpu_memory_usage
 from roll.utils.dynamic_batching import make_mini_batch_iter_for_dynamic_batching
@@ -36,7 +35,6 @@ class ActorWorker(Worker):
         self.tokenizer = None
         self.strategy: TrainStrategy = None
         self._logprobs_cache = {}
-        self._fp8_update_diagnostics = []
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def initialize(self, pipeline_config):
@@ -69,9 +67,6 @@ class ActorWorker(Worker):
         global_step = data.meta_info.get("global_step", 0)
         is_offload_states = data.meta_info.get("is_offload_states", True)
         metrics = {}
-        self._fp8_update_diagnostics = []
-        completed_backward_steps = 0
-        stopped_after_fp8_update_diagnostics = False
         self.logger.info(f"{self.worker_name} generate global step {global_step}")
 
         with state_offload_manger(
@@ -107,28 +102,14 @@ class ActorWorker(Worker):
             for batch_idx, backward_batch in tqdm(enumerate(dataloader),
                                                   desc=f"{self.worker_name} train global step {global_step}",
                                                   total=data.batch.batch_size[0] * self.pipeline_config.ppo_epochs // backward_batch_size):
-                backward_batch.meta_info["optimizer_batch_idx"] = batch_idx
                 pg_metrics = self.strategy.train_step(batch=backward_batch, loss_func=self.loss_func)
-                completed_backward_steps += 1
-                pop_diagnostics = getattr(self.strategy, "pop_update_probe_diagnostics", None)
-                if callable(pop_diagnostics):
-                    diagnostics = pop_diagnostics()
-                    if diagnostics is not None:
-                        self._fp8_update_diagnostics.append(diagnostics)
                 if self.worker_config.use_dynamic_batching_in_train or self.worker_config.use_sequence_packing:
                     pg_metrics = reduce_metrics(pg_metrics)
                 append_to_dict(metrics, pg_metrics)
 
-                consume_stop_request = getattr(self.strategy, "consume_update_probe_stop_request", None)
-                if callable(consume_stop_request) and consume_stop_request():
-                    stopped_after_fp8_update_diagnostics = True
-                    break
-
             metrics["actor/lr"] = self.strategy.scheduler.get_last_lr()[0]
-            backward_steps = completed_backward_steps
+            backward_steps = data.batch.batch_size[0] * self.pipeline_config.ppo_epochs // backward_batch_size
             metrics["actor/backward_steps"] = backward_steps
-            if stopped_after_fp8_update_diagnostics:
-                metrics["actor/fp8_update_diagnostic_only"] = 1.0
 
             # Divide @sum metrics by backward_steps to get average
             for key in list(metrics.keys()):
@@ -142,10 +123,7 @@ class ActorWorker(Worker):
             data.to("cpu")
 
         self._logprobs_cache.clear()
-        output_meta_info = {"metrics": metrics}
-        if self._fp8_update_diagnostics:
-            output_meta_info[FP8_UPDATE_DIAGNOSTICS_META_KEY] = self._fp8_update_diagnostics
-        output = DataProto(meta_info=output_meta_info)
+        output = DataProto(meta_info={"metrics": metrics})
         return output
 
     @register(dispatch_mode=Dispatch.DP_MP_DISPATCH_FIRST, trace=True, prefetch=False, to_remote=True)

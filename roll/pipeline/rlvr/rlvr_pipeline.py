@@ -30,11 +30,6 @@ from roll.pipeline.base_pipeline import BasePipeline
 from roll.utils.constants import RAY_NAMESPACE
 from roll.pipeline.rlvr.rlvr_config import RLVRConfig
 from roll.pipeline.rlvr.utils import dump_rollout_to_specific_path
-from roll.third_party.megatron.update_diagnostics import (
-    FP8_UPDATE_DIAGNOSTICS_META_KEY,
-    FP8_UPDATE_LOG_PREFIX,
-    flatten_fp8_update_diagnostics,
-)
 from roll.utils.dynamic_batching import dynamic_batching_shard
 from roll.utils.functionals import (
     RunningMoments,
@@ -492,7 +487,6 @@ class RLVRPipeline(BasePipeline):
             logger.info(f"pipeline step {global_step} start...")
 
             metrics_mgr.clear_metrics()
-            stop_after_fp8_update_diagnostics = False
             with (tps_timer, Timer(name="step_total", logger=None) as step_total_timer,
                 tracer.start_as_current_span("pipeline_step", attributes={"global_step": global_step}),
                 ExitStack() as defer,
@@ -798,19 +792,8 @@ class RLVRPipeline(BasePipeline):
                                 metrics_mgr.add_metrics(dynamic_batching_metrics)
                             actor_train_metrics_refs = self.actor_train.train_step(batch, blocking=False)
                             actor_train_metrics: DataProto = DataProto.materialize_concat(
-                                data_refs=actor_train_metrics_refs,
-                                global_keys={"metrics", FP8_UPDATE_DIAGNOSTICS_META_KEY},
+                                data_refs=actor_train_metrics_refs
                             )
-                            diagnostic_payloads = actor_train_metrics.meta_info.pop(
-                                FP8_UPDATE_DIAGNOSTICS_META_KEY, []
-                            )
-                            diagnostics = flatten_fp8_update_diagnostics(diagnostic_payloads)
-                            for diagnostic in diagnostics:
-                                logger.info(
-                                    f"{FP8_UPDATE_LOG_PREFIX} "
-                                    + json.dumps(diagnostic, ensure_ascii=False)
-                                )
-                            stop_after_fp8_update_diagnostics = bool(diagnostics)
                             metrics_mgr.add_reduced_metrics(actor_train_metrics.meta_info.pop("metrics", {}))
 
                     if self.pipeline_config.adv_estimator == "gae":
@@ -855,12 +838,6 @@ class RLVRPipeline(BasePipeline):
                     logger.info(json.dumps(metrics, ensure_ascii=False))
 
                 logger.info(f"pipeline step {global_step} finished")
-                if stop_after_fp8_update_diagnostics:
-                    logger.info(
-                        "FP8 first-update diagnostic completed; stopping before another backward "
-                        "uses diagnostic-mutated FP8 runtime state"
-                    )
-                    break
                 global_step += 1
             pre_step_total_time = step_total_timer.last
 

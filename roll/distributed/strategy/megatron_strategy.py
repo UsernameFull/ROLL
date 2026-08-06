@@ -68,6 +68,14 @@ from roll.third_party.megatron.router_replay_utils import (
     set_router_replay_data,
 )
 from roll.third_party.megatron.tensor_parallel import vocab_parallel_entropy
+from roll.third_party.megatron.update_diagnostics import (
+    build_masked_logprob_delta_statistics,
+    build_tensor_update_statistics,
+    iter_named_model_parameters,
+    iter_optimizer_master_parameters,
+    should_run_fp8_first_update_diagnostics,
+    snapshot_named_tensors,
+)
 from roll.third_party.megatron.util import unwrap_model
 from roll.utils.constants import (
     DIST_OPTIMIZER_DIR,
@@ -1156,6 +1164,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         self.models_unwrapped = None
         self.processor = None
         self._validate_access_integrity = True
+        self._update_probe_diagnostics = None
 
         # 新增：Router Replay 配置（用于 R2 和 R3 的 REPLAY）
         # 注意：这里会覆盖父类的配置，因为训练阶段的行为不同
@@ -1288,14 +1297,261 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
 
         dist.barrier()
 
+    def pop_update_probe_diagnostics(self):
+        """Return and clear the one-shot FP8 first-update diagnostics."""
+        diagnostics = self._update_probe_diagnostics
+        self._update_probe_diagnostics = None
+        return diagnostics
+
+    def _forward_logprob_probe(self, data: DataProto, output_tensor: torch.Tensor):
+        log_probs = self.op_compute_log_probs(
+            logits=output_tensor,
+            input_ids=data.batch["input_ids"],
+            attention_mask=data.batch["response_mask"],
+        )
+        zero_loss = torch.zeros((), device=output_tensor.device)
+        return zero_loss, {"log_probs": log_probs.detach()}
+
+    def _run_logprob_probe(self, batch: DataProto, *, disable_fp8: bool):
+        """Run a fixed-batch eval forward and restore model mode and FP8 configuration."""
+        config = self.model.config
+        if disable_fp8 and getattr(config, "fp8_param", False):
+            return None, "BF16 shadow is unsupported when fp8_param=true"
+        if disable_fp8 and getattr(config, "num_moe_experts", None):
+            return None, "BF16 shadow is disabled for MoE to avoid changing router state"
+
+        saved_config = {}
+        if disable_fp8:
+            for field_name in ("fp8", "fp8_format"):
+                if hasattr(config, field_name):
+                    saved_config[field_name] = getattr(config, field_name)
+                    setattr(config, field_name, None)
+
+        forward_models = self.model.get_models()
+        training_modes = [model.training for model in forward_models]
+        probe_batch = batch.clone()
+        probe_batch.meta_info["micro_batch_size"] = max(len(probe_batch), 1)
+        try:
+            for model in forward_models:
+                model.eval()
+            with torch.no_grad():
+                results = self.forward_step(batch=probe_batch, forward_func=self._forward_logprob_probe)
+            if results is None:
+                return None, None
+            return results["log_probs"].detach().to(device="cpu", dtype=torch.float32), None
+        except Exception as exc:
+            precision = "bf16_shadow" if disable_fp8 else "native_fp8"
+            logger.warning(f"Megatron {precision} first-update logprob probe failed: {exc}")
+            return None, f"{type(exc).__name__}: {exc}"
+        finally:
+            for field_name, value in saved_config.items():
+                setattr(config, field_name, value)
+            for model, training in zip(forward_models, training_modes):
+                model.train(training)
+
+    def _snapshot_update_parameters(self, *, master: bool):
+        try:
+            if master:
+                named_tensors = list(iter_optimizer_master_parameters(self.optimizer))
+                if not named_tensors:
+                    raise RuntimeError("Megatron optimizer exposes no FP32 master parameters")
+            else:
+                named_tensors = list(iter_named_model_parameters(self.models_unwrapped))
+                if not named_tensors:
+                    raise RuntimeError("Megatron model exposes no trainable forward parameters")
+            return snapshot_named_tensors(named_tensors), None
+        except Exception as exc:
+            parameter_kind = "FP32 master" if master else "BF16 forward"
+            logger.warning(f"Megatron {parameter_kind} parameter snapshot failed: {exc}")
+            return None, f"{type(exc).__name__}: {exc}"
+
+    def _build_local_update_statistics(
+        self,
+        snapshot,
+        *,
+        master: bool,
+        learning_rate: float | None,
+    ):
+        if snapshot is None:
+            return None, "pre-update snapshot is unavailable"
+        try:
+            current_tensors = (
+                iter_optimizer_master_parameters(self.optimizer)
+                if master
+                else iter_named_model_parameters(self.models_unwrapped)
+            )
+            return build_tensor_update_statistics(
+                snapshot,
+                current_tensors,
+                learning_rate=learning_rate,
+            ), None
+        except Exception as exc:
+            parameter_kind = "FP32 master" if master else "BF16 forward"
+            logger.warning(f"Megatron {parameter_kind} update statistics failed: {exc}")
+            return None, f"{type(exc).__name__}: {exc}"
+
+    def _reduce_update_statistics(
+        self,
+        local_statistics,
+        *,
+        master: bool,
+        learning_rate: float | None,
+    ):
+        try:
+            return self._reduce_update_statistics_impl(
+                local_statistics,
+                master=master,
+                learning_rate=learning_rate,
+            )
+        except Exception as exc:
+            parameter_kind = "FP32 master" if master else "BF16 forward"
+            logger.warning(f"Megatron {parameter_kind} statistics reduction failed: {exc}")
+            return None, f"{type(exc).__name__}: {exc}"
+
+    def _reduce_update_statistics_impl(
+        self,
+        local_statistics,
+        *,
+        master: bool,
+        learning_rate: float | None,
+    ):
+        """Reduce full local-shard statistics without gathering parameter tensors."""
+        parameter = next(
+            parameter
+            for model in self.models_unwrapped
+            for parameter in model.parameters()
+            if parameter.requires_grad
+        )
+        use_world_group = master and self.megatron_train_args.use_distributed_optimizer
+        group = None if use_world_group else mpu.get_model_parallel_group()
+        scope = "world_distributed_optimizer_shards" if use_world_group else "model_parallel_replica"
+
+        success = torch.tensor(
+            1 if local_statistics is not None else 0,
+            dtype=torch.int32,
+            device=parameter.device,
+        )
+        if dist.is_initialized():
+            dist.all_reduce(success, op=dist.ReduceOp.MIN, group=group)
+        if not success.item():
+            return None, f"statistics unavailable on one or more ranks in {scope}"
+
+        float_keys = ("param_sq_sum", "update_sq_sum")
+        count_keys = (
+            "numel",
+            "changed_numel",
+            "param_nonfinite_numel",
+            "update_nonfinite_numel",
+            "tensor_count",
+        )
+        float_values = torch.tensor(
+            [float(local_statistics[key]) for key in float_keys],
+            dtype=torch.float32,
+            device=parameter.device,
+        )
+        count_values = torch.tensor(
+            [int(local_statistics[key]) for key in count_keys],
+            dtype=torch.int64,
+            device=parameter.device,
+        )
+        max_value = torch.tensor(
+            float(local_statistics["update_abs_max"]),
+            dtype=torch.float32,
+            device=parameter.device,
+        )
+        if dist.is_initialized():
+            dist.all_reduce(float_values, op=dist.ReduceOp.SUM, group=group)
+            dist.all_reduce(count_values, op=dist.ReduceOp.SUM, group=group)
+            dist.all_reduce(max_value, op=dist.ReduceOp.MAX, group=group)
+
+        reduced = {key: float(value) for key, value in zip(float_keys, float_values.cpu().tolist())}
+        reduced.update({key: int(value) for key, value in zip(count_keys, count_values.cpu().tolist())})
+        param_norm = math.sqrt(max(reduced["param_sq_sum"], 0.0))
+        update_norm = math.sqrt(max(reduced["update_sq_sum"], 0.0))
+        relative_update_norm = update_norm / param_norm if param_norm else None
+        changed_fraction = reduced["changed_numel"] / reduced["numel"] if reduced["numel"] else None
+        relative_update_per_lr = (
+            relative_update_norm / learning_rate
+            if relative_update_norm is not None and learning_rate is not None and learning_rate > 0
+            else None
+        )
+        return {
+            **reduced,
+            "parameter_kind": "fp32_master_shards" if master else "bf16_forward_parameters",
+            "reduction_scope": scope,
+            "update_abs_max": float(max_value.cpu().item()),
+            "param_norm": param_norm,
+            "update_norm": update_norm,
+            "relative_update_norm": relative_update_norm,
+            "changed_fraction": changed_fraction,
+            "relative_update_per_lr": relative_update_per_lr,
+            "learning_rate_applied": learning_rate,
+            "statistics_mode": "full_no_sampling",
+            "local_accumulation_dtype": "float64",
+            "collective_accumulation_dtype": "float32",
+            "count_collective_dtype": "int64",
+            "top_tensors_on_emitting_rank": local_statistics["top_tensors_local"],
+        }, None
+
+    def _build_logprob_update_diagnostics(
+        self,
+        probe_batch: DataProto,
+        *,
+        native_before,
+        native_after,
+        bf16_before,
+        bf16_after,
+        errors: dict[str, str],
+    ) -> dict[str, object]:
+        diagnostics: dict[str, object] = {
+            "native_precision": "fp8",
+            "model_mode": "eval",
+            "same_probe_batch_before_after": True,
+            "native_probe_may_update_fp8_metadata": True,
+        }
+        if errors:
+            diagnostics["errors"] = errors
+        if not self.worker.rank_info.is_pipeline_last_stage or self.worker.rank_info.tp_rank != 0:
+            return diagnostics
+
+        try:
+            probe_mask = probe_batch.batch["response_mask"][:, 1:].detach().to(device="cpu", dtype=torch.bool)
+        except Exception as exc:
+            diagnostics.setdefault("errors", {})["response_mask"] = f"{type(exc).__name__}: {exc}"
+            return diagnostics
+        comparisons = {
+            "native_after_vs_before": (native_after, native_before),
+            "bf16_after_vs_before": (bf16_after, bf16_before),
+            "bf16_vs_native_before": (bf16_before, native_before),
+            "bf16_vs_native_after": (bf16_after, native_after),
+        }
+        for name, (after, before) in comparisons.items():
+            if after is None or before is None:
+                continue
+            try:
+                diagnostics[name] = build_masked_logprob_delta_statistics(after, before, probe_mask)
+            except Exception as exc:
+                diagnostics.setdefault("errors", {})[name] = f"{type(exc).__name__}: {exc}"
+        return diagnostics
+
     def train_step(self, batch: DataProto, loss_func: Callable):
         self.model.train()
+        self._update_probe_diagnostics = None
 
         if self.enable_router_replay:
             assert "routed_experts" in batch.batch
             RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
 
         global_step = batch.meta_info.get("global_step", 0)
+        optimizer_batch_idx = batch.meta_info.get("optimizer_batch_idx", -1)
+        configured_fp8 = getattr(self.model.config, "fp8", None) or getattr(
+            self.megatron_train_args, "fp8", None
+        )
+        run_update_probe = should_run_fp8_first_update_diagnostics(
+            configured_fp8,
+            global_step,
+            optimizer_batch_idx,
+        )
         is_offload_optimizer_states_in_train_step = batch.meta_info.get("is_offload_optimizer_states_in_train_step", True)
         batch.meta_info['batch_num_tokens'] = self._get_batch_num_tokens(batch, dp_group=mpu.get_data_parallel_group())
         batch.meta_info['global_valid_samples'] = self._get_global_valid_samples(batch, dp_group=mpu.get_data_parallel_group())
@@ -1327,6 +1583,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             micro_batch.meta_info['loss_scale'] = num_microbatches * mpu.get_data_parallel_world_size()
             micro_batch.meta_info['micro_batch_size'] = micro_batch.batch.batch_size[0]
 
+        probe_batch = micro_batches_list[0].clone() if run_update_probe and micro_batches_list else None
         data_iterator = [iter(micro_batches_list) for _ in range(len(self.model))]
 
         metrics_tensors: List[Dict[str, "torch.Tensor"]] = self.forward_backward_func(
@@ -1346,7 +1603,63 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
 
         # 只有step的时候需要load optimizer states
         self.load_states(include=[OffloadStateType.optimizer_states])
+        learning_rate_applied = None
+        forward_snapshot = None
+        master_snapshot = None
+        forward_snapshot_error = None
+        master_snapshot_error = None
+        native_before = None
+        bf16_before = None
+        native_before_error = None
+        bf16_before_error = None
+        if run_update_probe:
+            if self.scheduler is not None:
+                learning_rate_applied = float(self.scheduler.get_last_lr()[0])
+            forward_snapshot, forward_snapshot_error = self._snapshot_update_parameters(master=False)
+            master_snapshot, master_snapshot_error = self._snapshot_update_parameters(master=True)
+            native_before, native_before_error = self._run_logprob_probe(probe_batch, disable_fp8=False)
+            bf16_before, bf16_before_error = self._run_logprob_probe(probe_batch, disable_fp8=True)
+
         update_successful, grad_norm, num_zeros_in_grad = self.optimizer.step()
+        if run_update_probe:
+            current_platform.synchronize()
+
+        forward_update = None
+        master_update = None
+        forward_update_error = None
+        master_update_error = None
+        if run_update_probe:
+            local_forward_update, local_forward_error = self._build_local_update_statistics(
+                forward_snapshot,
+                master=False,
+                learning_rate=learning_rate_applied,
+            )
+            local_master_update, local_master_error = self._build_local_update_statistics(
+                master_snapshot,
+                master=True,
+                learning_rate=learning_rate_applied,
+            )
+            forward_update, forward_reduce_error = self._reduce_update_statistics(
+                local_forward_update,
+                master=False,
+                learning_rate=learning_rate_applied,
+            )
+            master_update, master_reduce_error = self._reduce_update_statistics(
+                local_master_update,
+                master=True,
+                learning_rate=learning_rate_applied,
+            )
+            forward_update_error = local_forward_error or forward_reduce_error
+            master_update_error = local_master_error or master_reduce_error
+
+        native_after = None
+        bf16_after = None
+        native_after_error = None
+        bf16_after_error = None
+        if run_update_probe and update_successful:
+            native_after, native_after_error = self._run_logprob_probe(probe_batch, disable_fp8=False)
+            bf16_after, bf16_after_error = self._run_logprob_probe(probe_batch, disable_fp8=True)
+
         if is_offload_optimizer_states_in_train_step:
             self.offload_states(include=[OffloadStateType.optimizer_states], non_blocking=True)
 
@@ -1354,6 +1667,66 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             self.scheduler.step()
         else:
             raise NotImplementedError("megatron optimizer step failed!")
+
+        if run_update_probe:
+            errors = {
+                name: error
+                for name, error in {
+                    "bf16_forward_snapshot": forward_snapshot_error,
+                    "fp32_master_snapshot": master_snapshot_error,
+                    "bf16_forward_update": forward_update_error,
+                    "fp32_master_update": master_update_error,
+                    "native_before": native_before_error,
+                    "native_after": native_after_error,
+                    "bf16_before": bf16_before_error,
+                    "bf16_after": bf16_after_error,
+                }.items()
+                if error is not None
+            }
+            emit_diagnostics = (
+                self.worker.rank_info.dp_rank == 0
+                and self.worker.rank_info.tp_rank == 0
+                and self.worker.rank_info.cp_rank == 0
+                and self.worker.rank_info.is_pipeline_last_stage
+            )
+            if emit_diagnostics:
+                for name, value in {
+                    "native_before": native_before,
+                    "native_after": native_after,
+                    "bf16_before": bf16_before,
+                    "bf16_after": bf16_after,
+                }.items():
+                    if value is None and name not in errors:
+                        errors[name] = "probe returned no logprobs on the emitting rank"
+                self._update_probe_diagnostics = {
+                    "event": "megatron_fp8_first_optimizer_update",
+                    "rank": self.worker.rank,
+                    "dp_rank": self.worker.rank_info.dp_rank,
+                    "tp_rank": self.worker.rank_info.tp_rank,
+                    "pp_rank": self.worker.rank_info.pp_rank,
+                    "cp_rank": self.worker.rank_info.cp_rank,
+                    "global_step": global_step,
+                    "optimizer_batch_idx": optimizer_batch_idx,
+                    "fp8": str(configured_fp8),
+                    "fp8_recipe": str(getattr(self.megatron_train_args, "fp8_recipe", None)),
+                    "fp8_param": bool(getattr(self.model.config, "fp8_param", False)),
+                    "learning_rate_applied": learning_rate_applied,
+                    "bf16_forward_update": forward_update,
+                    "fp32_master_update": master_update,
+                    "logprob": self._build_logprob_update_diagnostics(
+                        probe_batch,
+                        native_before=native_before,
+                        native_after=native_after,
+                        bf16_before=bf16_before,
+                        bf16_after=bf16_after,
+                        errors=errors,
+                    ),
+                    "errors": errors,
+                }
+            del forward_snapshot, master_snapshot
+            del native_before, native_after, bf16_before, bf16_after
+            del probe_batch
+            current_platform.empty_cache()
 
         for model in self.model:
             for bucket_group in model.bucket_groups + model.expert_parallel_bucket_groups:

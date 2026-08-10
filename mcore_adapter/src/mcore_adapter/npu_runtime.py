@@ -54,14 +54,6 @@ def _ensure_npu_te_checkpoint_symbol(te_ext):
         te_ext.te_checkpoint = _npu_te_checkpoint
 
 
-def get_te_checkpoint_or_none():
-    try:
-        from megatron.core.extensions.transformer_engine import te_checkpoint
-    except ImportError:
-        return None
-    return te_checkpoint
-
-
 def ensure_npu_transformer_engine_symbols():
     if not current_platform.is_npu():
         return
@@ -105,10 +97,6 @@ def bootstrap_npu_runtime():
 
         meg_random._set_cuda_rng_state = patched_set
         meg_random._get_cuda_rng_state = patched_get
-
-        rng_state = torch.npu.get_rng_state()
-        meg_random._CUDA_RNG_STATE_TRACKER.states_["model-parallel-rng"] = rng_state
-        meg_random._CUDA_RNG_STATE_TRACKER.states_["data-parallel-rng"] = rng_state
 
         meg_random._npu_patched = True
 

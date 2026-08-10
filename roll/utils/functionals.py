@@ -253,8 +253,7 @@ def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str
     if loss_agg_mode == "token-mean":
         if weights is None:
             weights = torch.ones(loss_mask.shape[0], device=loss_mask.device)
-        masked_loss = torch.where(loss_mask.bool(), loss_mat, torch.zeros_like(loss_mat))
-        loss = (masked_loss * weights.unsqueeze(-1)).sum() / batch_num_tokens
+        loss = (loss_mat * weights.unsqueeze(-1)).sum() / batch_num_tokens
     elif loss_agg_mode == "seq-mean-token-sum":
         seq_losses = masked_sum(loss_mat, loss_mask, dim=-1)  # token-sum
         valid_samples = torch.any(loss_mask > 0, dim=-1).float()
@@ -430,15 +429,6 @@ def reduce_metrics(metrics: dict, reduce_func=np.mean) -> dict:
         # No aggregation specifier found → use default
         return reduce_func
 
-    def _to_cpu_numpy(value):
-        if isinstance(value, torch.Tensor):
-            return value.detach().cpu().numpy()
-        if isinstance(value, list):
-            return [_to_cpu_numpy(item) for item in value]
-        if isinstance(value, tuple):
-            return tuple(_to_cpu_numpy(item) for item in value)
-        return value
-
     for key, val in list(metrics.items()):
         # Skip reduction for scalars and tensors
         if isinstance(val, (int, float, np.number)) or isinstance(val, torch.Tensor):
@@ -448,7 +438,6 @@ def reduce_metrics(metrics: dict, reduce_func=np.mean) -> dict:
         if isinstance(val, (list, tuple, np.ndarray)):
             if len(val) == 0:
                 continue
-            val = _to_cpu_numpy(val)
             agg_func = _parse_aggregation_func(key)
             metrics[key] = float(agg_func(val))
         else:

@@ -224,7 +224,7 @@ def _qwen3_sparse_moe_routed_forward_npu(self, hidden_states: torch.Tensor):
     )
     if num_experts is None:
         num_experts = self.gate.weight.shape[0]
-    tokens_per_expert = torch.histc(selected_experts, bins=num_experts, min=0, max=num_experts)
+    tokens_per_expert = torch.bincount(selected_experts.flatten().to(torch.int64), minlength=num_experts)
 
     up_res = NPUGmmFunction.apply(permuted_tokens, w1, tokens_per_expert)
     gate_res = NPUGmmFunction.apply(permuted_tokens, w2, tokens_per_expert)
@@ -284,7 +284,7 @@ class NPUQwen3VLMoeTextExperts(nn.Module):
             permuted_hidden_states, row_ids_map = torch_npu.npu_moe_token_permute(
                 hidden_states, router_indices.to(torch.int32)
             )
-            tokens_per_expert = torch.histc(router_indices, bins=self.num_experts, min=0, max=self.num_experts)
+            tokens_per_expert = torch.bincount(router_indices.flatten().to(torch.int64), minlength=self.num_experts)
             intermediate_hidden_states = NPUGmmFunction.apply(
                 permuted_hidden_states, self.gate_up_proj, tokens_per_expert
             )
@@ -344,7 +344,7 @@ def qwen3_5_moe_experts_forward_npu(self, hidden_states, top_k_index, top_k_weig
     permuted_hidden_states, row_ids_map = torch_npu.npu_moe_token_permute(
         hidden_states, selected_experts.to(torch.int32)
     )
-    tokens_per_expert = torch.histc(selected_experts, bins=self.num_experts, min=0, max=self.num_experts)
+    tokens_per_expert = torch.bincount(selected_experts.flatten().to(torch.int64), minlength=self.num_experts)
     intermediate_hidden_states = NPUGmmFunction.apply(permuted_hidden_states, gate_up_proj, tokens_per_expert)
     intermediate_activations = torch_npu.npu_swiglu(intermediate_hidden_states, dim=-1)
     output = NPUGmmFunction.apply(intermediate_activations, down_proj, tokens_per_expert)

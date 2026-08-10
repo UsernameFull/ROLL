@@ -59,7 +59,6 @@ def _install_mock_vllm_modules(monkeypatch):
     mock_vllm.__version__ = "0.8.4"
     mock_vllm.RequestOutput = MockRequestOutput
     mock_vllm.SamplingParams = MockSamplingParams
-    mock_vllm.MockTokensPrompt = MockTokensPrompt
 
     sampling_params = ModuleType("vllm.sampling_params")
     sampling_params.RequestOutputKind = Mock()
@@ -76,7 +75,6 @@ def _install_mock_vllm_modules(monkeypatch):
 
     inputs = ModuleType("vllm.inputs")
     inputs.__path__ = []
-    inputs.TokensPrompt = MockTokensPrompt
     inputs_data = ModuleType("vllm.inputs.data")
     inputs_data.TokensPrompt = MockTokensPrompt
 

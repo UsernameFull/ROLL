@@ -1,4 +1,3 @@
-import inspect
 import math
 import os
 import random
@@ -51,7 +50,6 @@ from roll.distributed.scheduler.protocol import DataProto
 from roll.distributed.strategy.strategy import InferenceStrategy, TrainStrategy
 from roll.models.model_providers import default_processor_provider, default_tokenizer_provider
 from roll.platforms import current_platform
-from roll.third_party.megatron.attention_mask import build_causal_padding_mask
 from roll.third_party.megatron.compile_warmup import compile_warmup_pipeline_stages
 from roll.third_party.megatron.model_update import MegatronWeightUpdater
 from roll.third_party.megatron.mtp_patcher import patch_mtp_functions
@@ -93,33 +91,6 @@ if is_peft_available():
 
 
 logger = get_logger()
-
-
-def _build_optimizer_config(args: TrainingArguments, params_dtype: torch.dtype) -> OptimizerConfig:
-    kwargs = dict(
-        optimizer=args.optimizer,
-        lr=args.learning_rate,
-        min_lr=args.lr_scheduler_kwargs.get("min_lr", 0.0) if args.lr_scheduler_kwargs is not None else 0.0,
-        weight_decay=args.weight_decay,
-        adam_beta1=args.adam_beta1,
-        adam_beta2=args.adam_beta2,
-        adam_eps=args.adam_epsilon,
-        fp16=args.fp16,
-        bf16=args.bf16,
-        params_dtype=params_dtype,
-        use_distributed_optimizer=args.use_distributed_optimizer,
-        clip_grad=args.max_grad_norm,
-    )
-    optional_kwargs = {
-        "optimizer_cpu_offload": getattr(args, "optimizer_cpu_offload", None),
-        "optimizer_offload_fraction": getattr(args, "optimizer_offload_fraction", None),
-        "fp8_recipe": getattr(args, "fp8_recipe", None),
-    }
-    supported_params = inspect.signature(OptimizerConfig).parameters
-    kwargs.update(
-        {name: value for name, value in optional_kwargs.items() if value is not None and name in supported_params}
-    )
-    return OptimizerConfig(**kwargs)
 
 
 class MegatronInferStrategy(InferenceStrategy):
@@ -201,7 +172,7 @@ class MegatronInferStrategy(InferenceStrategy):
             # R2 mode: init router_replay_action=RouterReplayAction.RECORD
             RouterReplay.set_global_router_replay_action(RouterReplayAction.RECORD)
 
-        # logger.info(f"{self.model.get_models()}")
+        logger.info(f"{self.model.get_models()}")
         dist.barrier()
 
     def _validate_vlm_packing_support(self):
@@ -558,12 +529,6 @@ class MegatronInferStrategy(InferenceStrategy):
         else:
             input_ids = self._get_feature_on_this_cp_rank(input_ids, "input_ids")
             attention_mask = self._get_feature_on_this_cp_rank(attention_mask, "attention_mask")
-
-            if self.model.config.transformer_impl == "transformer_engine" and not self.model.config.num_moe_experts:
-                attention_mask = None
-            elif hasattr(torch, "npu") and torch.npu.is_available() and attention_mask is not None:
-                attention_mask = build_causal_padding_mask(attention_mask)
-
             if labels is not None:
                 labels = self._get_feature_on_this_cp_rank(labels, "labels")
             loss_mask = self._get_feature_on_this_cp_rank(loss_mask, "loss_mask")
@@ -1224,7 +1189,21 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
             if self.megatron_train_args.fp16
             else torch.bfloat16 if self.megatron_train_args.bf16 else torch.float32
         )
-        optimizer_config = _build_optimizer_config(self.megatron_train_args, params_dtype)
+        optimizer_config = OptimizerConfig(
+            optimizer=self.megatron_train_args.optimizer,
+            lr=self.megatron_train_args.learning_rate,
+            min_lr=self.megatron_train_args.lr_scheduler_kwargs.get("min_lr", 0.0),
+            weight_decay=self.megatron_train_args.weight_decay,
+            adam_beta1=self.megatron_train_args.adam_beta1,
+            adam_beta2=self.megatron_train_args.adam_beta2,
+            adam_eps=self.megatron_train_args.adam_epsilon,
+            fp8_recipe=self.megatron_train_args.fp8_recipe,
+            fp16=self.megatron_train_args.fp16,
+            bf16=self.megatron_train_args.bf16,
+            params_dtype=params_dtype,
+            use_distributed_optimizer=self.megatron_train_args.use_distributed_optimizer,
+            clip_grad=self.megatron_train_args.max_grad_norm,
+        )
         self.optimizer: MegatronOptimizer = get_megatron_optimizer(optimizer_config, self.models_wrapped)
 
         logger.info(f"megatron optimizer: {self.optimizer}")
@@ -1282,7 +1261,7 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         # if self.enable_router_replay and self.router_replay_mode == "R3":
             # RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
 
-        # logger.info(f"{self.model.get_models()}")
+        logger.info(f"{self.model.get_models()}")
         if self.megatron_train_args.compile_warmup and self.worker.rank_info.pp_size > 1:
             compile_warmup_pipeline_stages(self)
 

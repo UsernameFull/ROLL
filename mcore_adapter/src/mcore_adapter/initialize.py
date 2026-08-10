@@ -12,7 +12,6 @@ from .npu_runtime import (
     apply_megatron_adaptor_feature_defaults,
     bootstrap_npu_runtime,
     ensure_npu_transformer_engine_symbols,
-    get_te_checkpoint_or_none,
     sync_megatron_adaptor_args,
 )
 
@@ -26,7 +25,6 @@ __all__ = [
     "apply_megatron_adaptor_feature_defaults",
     "bootstrap_npu_runtime",
     "ensure_npu_transformer_engine_symbols",
-    "get_te_checkpoint_or_none",
     "initialize_megatron",
     "is_distribute_initialized",
     "sync_megatron_adaptor_args",
@@ -49,7 +47,7 @@ def _set_random_seed(seed_):
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        if current_platform.is_cuda() and current_platform.device_count() > 0:
+        if (current_platform.is_cuda() or current_platform.is_npu()) and current_platform.device_count() > 0:
             tensor_parallel.model_parallel_cuda_manual_seed(seed)
     else:
         raise ValueError("Seed ({}) should be a positive integer.".format(seed))

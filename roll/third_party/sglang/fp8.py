@@ -21,11 +21,7 @@ from sglang.srt.layers.parameter import (
 from sglang.srt.layers.moe import get_moe_runner_backend
 from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE
 
-from roll.utils.fp8 import (
-    per_block_fp8_quant,
-    is_mxfp8_ascend,
-    load_mxfp8_weight,
-)
+from roll.utils.fp8 import per_block_fp8_quant
 from roll.utils.logging import get_logger
 
 logger = get_logger()
@@ -80,8 +76,6 @@ def monkey_patch_fp8_linear_method():
         layer = layer()
         assert param is layer.weight
         target_device = layer.weight.device
-        is_mxfp8 = getattr(layer, "_roll_mxfp8", False)
-
         with target_device:
             loaded_weight = loaded_weight.to(target_device)
             weight = ModelWeightParameter(
@@ -92,17 +86,6 @@ def monkey_patch_fp8_linear_method():
                             )
             if loaded_weight.dtype == torch.float8_e4m3fn:
                 original_weight_loader(weight, loaded_weight, *args, **kwargs)
-            elif is_mxfp8:
-                # Ascend MXFP8 path: dynamic MX quant with torch_npu.
-                weight_scale_inv = BlockQuantScaleParameter(
-                                            data=layer.weight_scale_inv.data,
-                                            input_dim=1,
-                                            output_dim=0,
-                                            weight_loader=original_weight_loader,
-                                        )
-                load_mxfp8_weight(
-                    loaded_weight, layer, weight, weight_scale_inv, original_weight_loader, *args, **kwargs
-                )
             else:
                 if layer.format_ue8m0:
                     qweight, scale = per_block_fp8_quant_ue8m0(loaded_weight, layer.weight_block_size)
@@ -161,9 +144,6 @@ def monkey_patch_fp8_linear_method():
         assert not _is_cpu
         assert layer.input_scale is None
 
-        # Detect Ascend MXFP8 model.
-        layer._roll_mxfp8 = is_mxfp8_ascend(self.quant_config)
-
         if self.quant_config.skip_process_weights_after_loading:
             try:
                 from sglang.srt.layers.quantization.fp8_utils import (
@@ -216,17 +196,10 @@ def monkey_patch_fp8_moe_method():
         layer = layer()
         assert param is layer.w13_weight
         target_device = layer.w13_weight.device
-        is_mxfp8 = getattr(layer, "_roll_mxfp8", False)
-
         with target_device:
             loaded_weight = loaded_weight.to(target_device)
             if loaded_weight.dtype == torch.float8_e4m3fn:
                 original_weight_loader(layer.w13_weight, loaded_weight, *args, **kwargs)
-            elif is_mxfp8:
-                load_mxfp8_weight(
-                    loaded_weight, layer, layer.w13_weight, layer.w13_weight_scale_inv,
-                    original_weight_loader, *args, **kwargs
-                )
             else:
                 if layer.format_ue8m0:
                     qweight, scale = per_block_fp8_quant_ue8m0(loaded_weight, layer.weight_block_size)
@@ -246,17 +219,10 @@ def monkey_patch_fp8_moe_method():
         layer = layer()
         assert param is layer.w2_weight
         target_device = layer.w2_weight.device
-        is_mxfp8 = getattr(layer, "_roll_mxfp8", False)
-
         with target_device:
             loaded_weight = loaded_weight.to(target_device)
             if loaded_weight.dtype == torch.float8_e4m3fn:
                 original_weight_loader(layer.w2_weight, loaded_weight, *args, **kwargs)
-            elif is_mxfp8:
-                load_mxfp8_weight(
-                    loaded_weight, layer, layer.w2_weight, layer.w2_weight_scale_inv,
-                    original_weight_loader, *args, **kwargs
-                )
             else:
                 if layer.format_ue8m0:
                     qweight, scale = per_block_fp8_quant_ue8m0(loaded_weight, layer.weight_block_size)
@@ -287,9 +253,6 @@ def monkey_patch_fp8_moe_method():
         assert not _is_cpu
         assert not (_is_hip and _use_hip_int4)
         assert not _use_aiter
-
-        # Detect Ascend MXFP8 model.
-        layer._roll_mxfp8 = is_mxfp8_ascend(self.quant_config)
 
         if self.quant_config.skip_process_weights_after_loading:
             try:

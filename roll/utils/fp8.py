@@ -1,15 +1,7 @@
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any, List, Optional
 
 import torch
-
-from roll.utils.logging import get_logger
-
-logger = get_logger()
-
-# ---------------------------------------------------------------------------
-# Ascend NPU availability
-# ---------------------------------------------------------------------------
 
 _NPU_AVAILABLE = False
 try:
@@ -18,11 +10,6 @@ try:
     _NPU_AVAILABLE = hasattr(torch, "npu") and torch.npu.is_available()
 except ImportError:
     pass
-
-
-# ---------------------------------------------------------------------------
-# Ascend MXFP8 detection
-# ---------------------------------------------------------------------------
 
 
 def _get_quant_config_value(quant_config: Any, key: str, default: Any = None) -> Any:
@@ -62,29 +49,7 @@ def is_mxfp8_ascend(quant_config) -> bool:
     if _is_ascend_quant_description(quantization_config):
         return True
 
-    try:
-        from vllm_ascend.quantization.modelslim_config import AscendModelSlimConfig
-    except ImportError:
-        return False
-
-    if not isinstance(quant_config, AscendModelSlimConfig):
-        return False
-
-    return _is_ascend_quant_description(getattr(quant_config, "quant_description", None))
-
-
-# ---------------------------------------------------------------------------
-# FP8 constants
-# ---------------------------------------------------------------------------
-
-FP8_DTYPE = torch.float8_e4m3fn
-FP8_MAX = torch.finfo(FP8_DTYPE).max
-FP8_MIN = torch.finfo(FP8_DTYPE).min
-
-
-# ---------------------------------------------------------------------------
-# Ascend MXFP8 dynamic quantization
-# ---------------------------------------------------------------------------
+    return quant_config.__class__.__name__ == "AscendModelSlimConfig"
 
 
 def per_block_fp8_quant_ascend(
@@ -127,42 +92,6 @@ def per_block_fp8_quant_ascend(
     return param_lp, param_scale
 
 
-def load_mxfp8_weight(
-    loaded_weight: torch.Tensor,
-    layer: torch.nn.Module,
-    weight_param: torch.Tensor,
-    scale_param: torch.Tensor,
-    weight_loader: Callable[..., None],
-    *args: Any,
-    **kwargs: Any,
-) -> None:
-    """Quantize a BF16/FP16 weight to Ascend MXFP8 and load both qweight and scale.
-
-    Shared helper for vLLM and SGLang FP8 monkey-patches.  Eliminates the
-    duplication of the MXFP8 quantize-then-load pattern across linear, w13,
-    and w2 weight loaders.
-
-    Args:
-        loaded_weight: High-precision weight loaded from checkpoint (bf16/fp16).
-        layer: The target module (used to resolve ``params_dtype``).
-        weight_param: Weight parameter to load the quantized tensor into.
-        scale_param: Scale parameter to load the per-block scale into.
-        weight_loader: The original framework weight loader callable.
-        *args: Passed through to *weight_loader*.
-        **kwargs: Passed through to *weight_loader*.
-    """
-    qweight, scale = per_block_fp8_quant_ascend(
-        loaded_weight,
-        dtype=getattr(layer, "params_dtype", torch.bfloat16),
-    )
-    weight_loader(weight_param, qweight, *args, **kwargs)
-    weight_loader(scale_param, scale, *args, **kwargs)
-
-
-# ---------------------------------------------------------------------------
-# GPU blockwise FP8 quantization (existing)
-# ---------------------------------------------------------------------------
-
 # Block quant operator
 #
 # Borrow from transformers
@@ -176,6 +105,10 @@ def per_block_fp8_quant(param_value: torch.Tensor, weight_block_size: List[int])
     """
     Quantizes weights to FP8 format using Block-wise quantization
     """
+    # Get FP8 min/max values
+    fp8_min = torch.finfo(torch.float8_e4m3fn).min
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+
     block_size_m, block_size_n = weight_block_size
 
     rows, cols = param_value.shape[-2:]
@@ -192,12 +125,12 @@ def per_block_fp8_quant(param_value: torch.Tensor, weight_block_size: List[int])
 
     # Calculate scaling factor for each block
     max_abs = torch.amax(torch.abs(param_value), dim=(-1, -2))
-    scale = FP8_MAX / max_abs
+    scale = fp8_max / max_abs
     scale_orig_shape = scale.shape
     scale = scale.unsqueeze(-1).unsqueeze(-1)
 
     # Quantize the weights
-    quantized_param = torch.clamp(param_value * scale, min=FP8_MIN, max=FP8_MAX).to(FP8_DTYPE)
+    quantized_param = torch.clamp(param_value * scale, min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
 
     quantized_param = quantized_param.permute(0, 1, 3, 2, 4)
     # Reshape back to matrix shape

@@ -6,6 +6,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
+from megatron.core.extensions.transformer_engine import (
+    TEColumnParallelGroupedLinear,
+    TEColumnParallelLinear,
+    TEGroupedLinear,
+    TELayerNormColumnParallelLinear,
+    TELinear,
+    TERowParallelGroupedLinear,
+    TERowParallelLinear,
+)
 from megatron.core.parallel_state import (
     get_expert_model_parallel_rank,
     get_expert_model_parallel_world_size,
@@ -23,16 +32,6 @@ from peft.tuners.tuners_utils import BaseTunerLayer, check_adapters_to_merge
 from peft.utils import transpose
 
 from ..platforms import current_platform
-from .te_compat import (
-    HAVE_MEGATRON_TE,
-    TEColumnParallelGroupedLinear,
-    TEColumnParallelLinear,
-    TEGroupedLinear,
-    TELayerNormColumnParallelLinear,
-    TELinear,
-    TERowParallelGroupedLinear,
-    TERowParallelLinear,
-)
 
 
 class LoraParallelLinear(MegatronModule, LoraLayer):
@@ -558,9 +557,6 @@ def dispatch_megatron(
 
 
 def patch_TELinear():
-    if not HAVE_MEGATRON_TE:
-        return
-
     def __repr__(self):
         return (
             f"{type(self).__name__}(in_features={self.in_features}, "
@@ -571,9 +567,6 @@ def patch_TELinear():
 
 
 def patch_TEGroupedLinear():
-    if not HAVE_MEGATRON_TE:
-        return
-
     def sharded_state_dict(
         self,
         prefix: str = "",

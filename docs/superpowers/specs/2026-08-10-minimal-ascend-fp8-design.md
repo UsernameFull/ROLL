@@ -1,127 +1,110 @@
-# Minimal Ascend FP8 Support Design
+# 昇腾 FP8 最小化支持设计
 
-## Objective
+## 目标
 
-Reduce the current branch's difference from `alibaba/main` while preserving
-three end-to-end Ascend FP8 capabilities:
+在缩小当前分支相对 `alibaba/main` 差异的同时，保留以下三条端到端昇腾
+FP8 能力：
 
-1. Megatron FP8 computation with BF16/FP16 model parameters.
-2. vLLM online conversion of synchronized BF16/FP16 weights to Ascend MXFP8.
-3. Megatron training from a ModelSlim pre-quantized MXFP8 checkpoint.
+1. 使用 BF16/FP16 模型参数进行 Megatron FP8 计算训练。
+2. vLLM 将同步得到的 BF16/FP16 权重在线转换为昇腾 MXFP8。
+3. Megatron 从 ModelSlim 预量化 MXFP8 checkpoint 加载并训练。
 
-The implementation targets one dependency matrix only:
+实现只面向以下固定依赖组合：
 
 - vLLM `0.23.0`
 - vLLM-Ascend `0.23.0rc1`
 - MegatronAdaptor `core_r0.17.0`
-- TransformerEngineNPU paired with MegatronAdaptor
+- 与 MegatronAdaptor 配套的 TransformerEngineNPU
 
-Supporting these fixed versions is more important than preserving compatibility
-with earlier vLLM or vLLM-Ascend releases.
+支持这些固定版本优先于兼容更早的 vLLM 或 vLLM-Ascend 版本。
 
-## Current-State Finding
+## 当前状态
 
-At the start of this audit, the branch was 48 commits ahead of `alibaba/main`,
-with 6,305 insertions and 406 deletions. The difference combines FP8
-functionality with NPU enablement, old vLLM compatibility, SGLang and FSDP2
-experiments, diagnostics, CI, container setup, examples, and design history.
-The largest avoidable cost is the version-dispatch and
-parameter-compatibility code in the vLLM FP8 and worker patches.
+审计开始时，当前分支相对 `alibaba/main` 领先 48 个提交，包含 6,305 行新增
+和 406 行删除。差异中混合了 FP8 功能、NPU 基础适配、旧版 vLLM 兼容、
+SGLang 和 FSDP2 实验、诊断代码、CI、容器配置、示例以及历史设计文档。
+其中最大的可裁剪部分是 vLLM FP8 和 worker 补丁中的多版本分支与参数兼容代码。
 
-## Architecture
+## 架构设计
 
-### Megatron FP8 computation
+### Megatron FP8 计算训练
 
-`TrainingArguments` remains the public configuration boundary. It accepts the
-Megatron FP8 format and recipe, validates supported combinations, and passes
-only the required values through `megatron_strategy` to `McaModelConfig`.
+`TrainingArguments` 作为公开配置入口，接收 Megatron FP8 格式和 recipe，校验
+受支持的参数组合，并仅通过 `megatron_strategy` 将必要参数传递给
+`McaModelConfig`。
 
-On NPU, initialization imports MegatronAdaptor before constructing the model,
-applies its defaults, and synchronizes ROLL arguments into the adaptor. Native
-Megatron and TransformerEngineNPU then own FP8 autocast, recipes, scaling, and
-trainable state. ROLL must not duplicate those algorithms.
+在 NPU 环境中，初始化流程必须在构建模型前导入 MegatronAdaptor，应用其默认值，
+并将 ROLL 参数同步给 adaptor。FP8 autocast、recipe、缩放和可训练状态由原生
+Megatron 与 TransformerEngineNPU 负责，ROLL 不重复实现这些算法。
 
-### vLLM online MXFP8
+### vLLM 在线 MXFP8
 
-The vLLM strategy accepts `online_quantization: ascend_mxfp8`. During engine
-configuration ROLL builds the smallest ModelSlim-compatible quantization
-description required by supported dense and MoE Qwen models and passes it as
-an Ascend quantization configuration.
+vLLM strategy 接受 `online_quantization: ascend_mxfp8`。配置推理引擎时，ROLL
+为支持的 Qwen 稠密模型和 MoE 模型生成最小的 ModelSlim 兼容量化描述，并作为
+昇腾量化配置传入 vLLM。
 
-During a weight update, vLLM first applies its normal TP/EP sharding. The ROLL
-worker hook then quantizes each eligible floating-point shard with
-`torch_npu.npu_dynamic_mx_quant`, supplies its scale tensor, and delegates
-packing and runtime preparation to the vLLM-Ascend 0.23 quantization method.
-Repeated updates must replace the existing quantized values without changing
-parameter identity required by graph execution.
+更新权重时，vLLM 首先执行正常的 TP/EP 分片。随后 ROLL worker hook 使用
+`torch_npu.npu_dynamic_mx_quant` 量化每个符合条件的浮点权重分片，提供对应的
+scale tensor，再将权重打包和运行时准备交给 vLLM-Ascend 0.23 的量化方法。
+重复更新必须在不改变图执行所依赖参数身份的前提下替换量化值。
 
-No vLLM 0.10-0.20 processing implementation or version selector is retained.
+不再保留 vLLM 0.10–0.20 的权重处理实现或版本选择逻辑。
 
-### ModelSlim pre-quantized training
+### ModelSlim 预量化训练
 
-An explicit `quantized_checkpoint_format: ascend_mxfp8` switch selects this
-path. A small checkpoint adapter reads ModelSlim quantization metadata,
-distinguishes quantized and floating-point tensors, and pairs each quantized
-weight with its scale sidecar.
+通过显式配置 `quantized_checkpoint_format: ascend_mxfp8` 选择该路径。轻量
+checkpoint adapter 负责读取 ModelSlim 量化元数据、区分量化权重与浮点权重，
+并为每个量化权重匹配对应的 scale sidecar。
 
-The adapter does not implement QKV merging, MoE merging, or distributed
-sharding. It calls one fixed MindSpeed-TE loader contract for those operations.
-If the loader is unavailable or a weight/scale pair is incomplete, loading
-fails with a specific error; it never silently dequantizes into BF16 training.
+adapter 不自行实现 QKV 合并、MoE 权重合并或分布式分片，而是通过一个固定的
+MindSpeed-TE loader 接口完成这些操作。如果 loader 不可用，或者 weight/scale
+不完整，加载过程必须抛出明确错误，禁止静默反量化为 BF16 后继续训练。
 
-## Minimality Rules
+## 最小化规则
 
-The implementation will retain a changed file only when it is on one of the
-three runtime paths above or is required by their focused tests.
+只有位于上述三条运行链路中，或被这些链路的聚焦测试直接依赖的文件，才允许保留
+相对 `alibaba/main` 的改动。
 
-Remove:
+删除以下内容：
 
-- vLLM branches and implementations for releases before 0.23;
-- SGLang, FSDP2, CUDA/H100, and unrelated model extensions;
-- diagnostic logging and log-probability investigation code;
-- duplicate parameter-subclass and runtime compatibility abstractions already
-  provided by the fixed upstream versions;
-- redundant examples, historical design documents, and FP8-specific CI
-  scaffolding not required at runtime.
+- vLLM 0.23 之前版本的分支与实现；
+- SGLang、FSDP2、CUDA/H100 和无关模型扩展；
+- 诊断日志以及用于排查 log probability 的代码；
+- 固定上游版本已经提供的参数子类和运行时兼容抽象；
+- 重复示例、历史设计文档，以及运行时不依赖的 FP8 专用 CI 脚手架。
 
-Retain:
+保留以下内容：
 
-- one four-NPU example exercising Megatron FP8 and vLLM online MXFP8;
-- focused configuration, metadata parsing, quantization, and repeat-update
-  regression tests;
-- the previously requested MoE group-count, NPU RNG, short-response whitening,
-  and GDN worker fixes;
-- the user's existing Dockerfile and untracked BF16 example changes.
+- 一个同时覆盖 Megatron FP8 和 vLLM 在线 MXFP8 的四 NPU 示例；
+- 配置、元数据解析、量化和重复权重更新的聚焦回归测试；
+- 此前要求修复的 MoE 分组计数、NPU RNG、短响应 whitening 和 GDN worker
+  问题；
+- 用户现有的 Dockerfile 改动和未跟踪的 BF16 示例。
 
-General NPU changes are retained only if the four-NPU FP8 path directly
-requires them. Merely being useful to another NPU model or framework is not
-sufficient.
+通用 NPU 改动只有在四 NPU FP8 链路直接依赖时才保留。仅仅对其他 NPU 模型或
+框架有帮助，不构成保留理由。
 
-## Error Handling
+## 错误处理
 
-- Reject unsupported dependency versions at startup with the expected version
-  matrix in the error message.
-- Reject conflicting `quantization` and `online_quantization` settings.
-- Reject `fp8_param=True` unless NPU, TransformerEngineNPU, MXFP8 recipe, and
-  the explicit ModelSlim checkpoint format are all active.
-- Reject missing or malformed quantization metadata and missing scale tensors.
-- Reject a missing MindSpeed-TE trainable loader instead of falling back to
-  dequantized parameters.
+- 启动时拒绝不受支持的依赖版本，并在错误信息中列出预期版本组合。
+- 拒绝相互冲突的 `quantization` 和 `online_quantization` 配置。
+- 除非 NPU、TransformerEngineNPU、MXFP8 recipe 和显式 ModelSlim checkpoint
+  格式同时启用，否则拒绝 `fp8_param=True`。
+- 拒绝缺失或格式错误的量化元数据，以及缺失 scale tensor 的 checkpoint。
+- 缺少 MindSpeed-TE 可训练 loader 时直接报错，不回退为反量化参数。
 
-## Verification
+## 验证方案
 
-CPU-capable tests cover configuration validation, quantization-description
-generation, checkpoint metadata and weight/scale pairing, and update lifecycle
-logic with mocked quantization operations.
+可在 CPU 环境运行的测试覆盖配置校验、量化描述生成、checkpoint 元数据解析、
+weight/scale 配对，以及使用 mock 量化算子的重复更新生命周期。
 
-The NPU smoke test uses the retained Qwen3 0.6B four-NPU example and verifies:
+NPU smoke test 使用保留的 Qwen3 0.6B 四 NPU 示例，并验证：
 
-1. Megatron creates FP8-enabled TransformerEngineNPU layers.
-2. One forward/backward and optimizer step completes.
-3. BF16/master weights synchronize to the vLLM worker.
-4. The worker produces MXFP8 weights and scales after sharding.
-5. Two consecutive weight updates and one generation complete.
+1. Megatron 创建启用了 FP8 的 TransformerEngineNPU 层。
+2. 一次 forward、backward 和 optimizer step 正常完成。
+3. BF16/master 权重成功同步到 vLLM worker。
+4. worker 在分片后生成 MXFP8 权重与 scale。
+5. 连续执行两次权重更新和一次 generation 均能完成。
 
-The final review compares both changed files and line count against
-`alibaba/main`, checks that every remaining difference maps to an approved
-runtime path, and reports any verification that cannot run locally.
+最终审查将统计相对 `alibaba/main` 的改动文件和行数，确认每项剩余差异都能映射
+到已批准的运行链路，并明确报告本地环境无法执行的验证项。

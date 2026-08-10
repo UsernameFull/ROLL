@@ -37,6 +37,12 @@ SGLang 和 FSDP2 实验、诊断代码、CI、容器配置、示例以及历史�
 并将 ROLL 参数同步给 adaptor。FP8 autocast、recipe、缩放和可训练状态由原生
 Megatron 与 TransformerEngineNPU 负责，ROLL 不重复实现这些算法。
 
+`mcore_adapter.adapters` 不得在 ROLL 模块导入阶段提前解析 TransformerEngine
+类型。普通 FP8 训练不依赖 LoRA adapter，因此相关导入应延迟到实际启用
+Megatron LoRA、且 MegatronAdaptor 已完成初始化之后。固定依赖组合应直接使用
+TransformerEngineNPU 提供的类型；删除以占位类型吞掉 `ImportError` 的
+`te_compat.py`。如果启用 LoRA 时缺少必要 TE 类型，应直接报告依赖错误。
+
 ### vLLM 在线 MXFP8
 
 vLLM strategy 接受 `online_quantization: ascend_mxfp8`。配置推理引擎时，ROLL
@@ -71,6 +77,7 @@ MindSpeed-TE loader 接口完成这些操作。如果 loader 不可用，或者 
 - SGLang、FSDP2、CUDA/H100 和无关模型扩展；
 - 诊断日志以及用于排查 log probability 的代码；
 - 固定上游版本已经提供的参数子类和运行时兼容抽象；
+- 仅用于掩盖 LoRA/TransformerEngine 提前导入问题的 `te_compat.py`；
 - 重复示例、历史设计文档，以及运行时不依赖的 FP8 专用 CI 脚手架。
 
 保留以下内容：

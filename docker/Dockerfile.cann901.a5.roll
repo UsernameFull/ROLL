@@ -1,4 +1,4 @@
-FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.1-950-ubuntu22.04-py3.12
+FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.1.0-950-ubuntu22.04-py3.12-devel
 
 ARG ROLL_REPO=https://github.com/UsernameFull/ROLL.git
 ARG MEGATRON_COMMIT=963bf39218e8bb83a1203b40293358498322be50
@@ -39,21 +39,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python3 -m pip install --upgrade pip setuptools wheel \
     && python3 -m pip install --index-url https://download.pytorch.org/whl/cpu \
         torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 \
-    && python3 -m pip install --index-url ${ASCEND_PYPI_URL} --no-deps torch-npu==2.10.0.post2 \
-    && python3 -m pip install --index-url ${ASCEND_PYPI_URL} triton-ascend==3.2.1 \
+    && python3 -m pip install --index-url https://repo.huaweicloud.com/repository/pypi/simple --no-deps torch-npu==2.10.0.post4 \
+    && python3 -m pip install --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple triton-ascend==3.2.2 \
     && python3 -m pip install numpy==1.26.4 opencv-python-headless==4.10.0.84
 
 WORKDIR /workspace
 
 RUN git clone --depth 1 --branch v0.23.0 https://github.com/vllm-project/vllm.git vllm-v0.23.0 \
     && git clone --depth 1 --branch v0.23.0rc1 https://github.com/vllm-project/vllm-ascend.git vllm-ascend-v0.23.0rc1 \
-    && git clone --depth 1 --branch npu_fp8 ${ROLL_REPO} ROLL \
+    && git clone --depth 1 --branch npu_fp8 https://github.com/UsernameFull/ROLL.git ROLL \
     && git clone --depth 1 --branch core_r0.17.0 https://github.com/NVIDIA/Megatron-LM.git Megatron-LM \
-    && git clone --depth 1 https://github.com/Ascend/TransformerEngineNPU.git TransformerEngineNPU \
-    && git clone --depth 1 --branch core_r0.17.0 https://github.com/Ascend/MegatronAdaptor.git MegatronAdaptor \
-    && cd /workspace/Megatron-LM && git fetch --depth 1 origin ${MEGATRON_COMMIT} && git checkout ${MEGATRON_COMMIT} \
-    && cd /workspace/TransformerEngineNPU && git fetch --depth 1 origin ${TRANSFORMER_ENGINE_NPU_COMMIT} && git checkout ${TRANSFORMER_ENGINE_NPU_COMMIT} \
-    && cd /workspace/MegatronAdaptor && git fetch --depth 1 origin ${MEGATRON_ADAPTOR_COMMIT} && git checkout ${MEGATRON_ADAPTOR_COMMIT}
+    && git clone --depth 1 https://gitcode.com/Ascend/TransformerEngineNPU TransformerEngineNPU \
+    && git clone --depth 1 --branch core_r0.17.0 https://gitcode.com/Ascend/MegatronAdaptor MegatronAdaptor
+
+
+RUN python -m pip install -U pip setuptools wheel setuptools-rust setuptools-scm packaging "cmake>=3.26" ninja
+
 
 RUN source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh \
     && source /usr/local/Ascend/nnal/atb/set_env.sh \

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from collections.abc import Mapping
 from typing import Any
 
@@ -12,10 +10,14 @@ _ATTENTION_PROJECTIONS = ("q_proj", "k_proj", "v_proj", "o_proj", "qkv_proj")
 _DENSE_MLP_PROJECTIONS = ("gate_proj", "up_proj", "down_proj", "gate_up_proj")
 
 
+def _require_mapping(value: Any, name: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{name} must be a mapping.")
+    return value
+
+
 def default_load_format_for_quantization(kwargs: Mapping[str, Any]) -> str:
-    if kwargs.get("online_quantization"):
-        return "dummy"
-    return "auto" if kwargs.get("quantization") == "ascend" else "dummy"
+    return "auto" if kwargs.get("quantization") == "ascend" and not kwargs.get("online_quantization") else "dummy"
 
 
 def _set_projections(description: dict[str, Any], prefix: str, names: tuple[str, ...], value: str) -> None:
@@ -26,10 +28,8 @@ def _is_moe_model(config: Any, options: Mapping[str, Any]) -> bool:
     if "is_moe" in options:
         return bool(options["is_moe"])
     model_type = str(getattr(config, "model_type", "")).lower()
-    return "moe" in model_type or any(
-        getattr(config, name, 0) not in (None, 0, 1)
-        for name in ("num_experts", "num_local_experts", "n_routed_experts", "moe_intermediate_size")
-    )
+    expert_fields = ("num_experts", "num_local_experts", "n_routed_experts", "moe_intermediate_size")
+    return "moe" in model_type or any(getattr(config, name, 0) not in (None, 0, 1) for name in expert_fields)
 
 
 def _is_moe_layer(config: Any, layer_idx: int) -> bool:
@@ -43,10 +43,10 @@ def _is_moe_layer(config: Any, layer_idx: int) -> bool:
 
 def build_ascend_mxfp8_quant_description(
     hf_config: Any,
-    options: dict[str, Any] | None = None,
+    options: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the ModelSlim description needed by vLLM-Ascend for Qwen rollout."""
-    options = dict(options or {})
+    options = options or {}
     config = getattr(hf_config, "text_config", hf_config)
     num_layers = options.get("num_hidden_layers", getattr(config, "num_hidden_layers", None))
     if num_layers is None:
@@ -68,25 +68,15 @@ def build_ascend_mxfp8_quant_description(
         if is_moe and _is_moe_layer(config, layer_idx):
             _set_projections(description, mlp, ("gate", "router"), FLOAT_QUANT_TYPE)
             _set_projections(
-                description,
-                f"{mlp}.experts.0",
-                ("gate_proj", "up_proj", "down_proj"),
-                ASCEND_MXFP8_QUANT_TYPE,
+                description, f"{mlp}.experts.0", _DENSE_MLP_PROJECTIONS[:3], ASCEND_MXFP8_QUANT_TYPE
             )
             description[f"{mlp}.experts.weight"] = ASCEND_MXFP8_QUANT_TYPE
-            _set_projections(
-                description,
-                f"{mlp}.shared_expert",
-                _DENSE_MLP_PROJECTIONS,
-                ASCEND_MXFP8_QUANT_TYPE,
-            )
+            _set_projections(description, f"{mlp}.shared_expert", _DENSE_MLP_PROJECTIONS, ASCEND_MXFP8_QUANT_TYPE)
         else:
             _set_projections(description, mlp, _DENSE_MLP_PROJECTIONS, ASCEND_MXFP8_QUANT_TYPE)
 
-    extra = options.get("extra_quant_description", {})
-    if not isinstance(extra, Mapping):
-        raise TypeError("online_quantization_config.extra_quant_description must be a mapping.")
-    description.update(extra)
+    extra_description = options.get("extra_quant_description", {})
+    description.update(_require_mapping(extra_description, "online_quantization_config.extra_quant_description"))
     return description
 
 
@@ -97,38 +87,32 @@ def apply_online_quantization_config(kwargs: dict[str, Any], hf_config: Any | No
         return None
     if online_quantization != ASCEND_MXFP8_ONLINE_QUANTIZATION:
         raise ValueError(f"Unsupported online_quantization={online_quantization!r}.")
-    if not isinstance(options, Mapping):
-        raise TypeError("online_quantization_config must be a mapping.")
+    options = _require_mapping(options, "online_quantization_config")
     if kwargs.get("quantization") not in (None, "ascend"):
         raise ValueError(
             "online_quantization=ascend_mxfp8 requires strategy_config.quantization "
             "to be omitted or set to 'ascend'."
         )
 
-    kwargs["quantization"] = "ascend"
-    kwargs["load_format"] = "dummy"
+    kwargs.update(quantization="ascend", load_format="dummy")
     if hf_config is None:
         from transformers import AutoConfig
 
-        if not kwargs.get("model"):
+        model = kwargs.get("model")
+        if not model:
             raise ValueError("online_quantization=ascend_mxfp8 requires the vLLM model path.")
         hf_config = AutoConfig.from_pretrained(
-            kwargs["model"],
+            model,
             trust_remote_code=bool(kwargs.get("trust_remote_code", True)),
             revision=kwargs.get("revision"),
         )
 
-    description = build_ascend_mxfp8_quant_description(hf_config, dict(options))
-    hf_overrides = kwargs.get("hf_overrides") or {}
-    if not isinstance(hf_overrides, Mapping):
-        raise TypeError("hf_overrides must be a mapping for Ascend online MXFP8.")
-    hf_overrides = dict(hf_overrides)
-    user_description = hf_overrides.get("quantization_config", {})
-    if not isinstance(user_description, Mapping):
-        raise TypeError("hf_overrides.quantization_config must be a mapping.")
-    description.update(user_description)
+    hf_overrides = dict(_require_mapping(kwargs.get("hf_overrides") or {}, "hf_overrides"))
+    description = {
+        **build_ascend_mxfp8_quant_description(hf_config, options),
+        **_require_mapping(hf_overrides.get("quantization_config", {}), "hf_overrides.quantization_config"),
+    }
     if description.get("quant_method") != "ascend":
         raise ValueError("hf_overrides.quantization_config.quant_method must be 'ascend'.")
-    hf_overrides["quantization_config"] = description
-    kwargs["hf_overrides"] = hf_overrides
+    kwargs["hf_overrides"] = {**hf_overrides, "quantization_config": description}
     return description

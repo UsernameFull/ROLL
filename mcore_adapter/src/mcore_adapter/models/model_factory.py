@@ -11,15 +11,15 @@ from transformers.tokenization_utils import PreTrainedTokenizer
 from transformers.utils import is_peft_available
 
 from ..checkpointing import find_dist_ckpt, generate_model_state_dict, load_state_dict_from_checkpoint, save_config_and_state_dict
-from ..initialize import ensure_npu_transformer_engine_symbols
+from ..npu_runtime import ensure_npu_transformer_engine_symbols
 from ..platforms import current_platform
 from ..utils import get_logger
-from .converter.convert_utils import MAX_SHARD_SIZE
-from .converter.ascend_mxfp8 import (
+from .checkpoint_loaders.ascend_mxfp8 import (
     AscendMxfp8CheckpointAdapter,
-    is_ascend_mxfp8_checkpoint_format,
+    detect_ascend_mxfp8_quant_description,
     require_trainable_mxfp8_state_dict_loader,
 )
+from .converter.convert_utils import MAX_SHARD_SIZE
 from .converter.model_converter import ModelConverter
 from .model_config import McaModelConfig
 from .model_utils import (
@@ -296,13 +296,16 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
                 )
             mxfp8_adapter = None
             mxfp8_state_dict_loader = None
-            if is_ascend_mxfp8_checkpoint_format(getattr(config, "quantized_checkpoint_format", None)):
+            mxfp8_description = detect_ascend_mxfp8_quant_description(model_name_or_path)
+            if mxfp8_description is not None:
                 if not getattr(config, "fp8_param", False):
                     raise ValueError(
-                        "Loading an Ascend ModelSlim MXFP8 checkpoint for Megatron training requires fp8_param=True."
+                        "Detected an Ascend ModelSlim MXFP8 checkpoint; Megatron training requires fp8_param=True."
                     )
-                mxfp8_adapter = AscendMxfp8CheckpointAdapter.from_model_path(model_name_or_path)
+                mxfp8_adapter = AscendMxfp8CheckpointAdapter(mxfp8_description)
                 mxfp8_state_dict_loader = require_trainable_mxfp8_state_dict_loader()
+            elif getattr(config, "fp8_param", False):
+                raise ValueError("fp8_param=True requires an Ascend ModelSlim MXFP8 checkpoint.")
 
             state_dict = {}
             converter = ModelConverter(config, resized_vocab_size=resized_vocab_size)

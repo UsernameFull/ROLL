@@ -28,22 +28,19 @@ from roll.utils.packages import is_transformers_version_greater_than
 
 try:
     from mcore_adapter import TrainingArguments as mca_TrainingArguments
+    from mcore_adapter.adapters import (
+        apply_megatron_lora,
+        find_all_embedding_modules,
+        find_all_linear_modules,
+        find_all_router_modules,
+        set_linear_is_expert,
+    )
     from mcore_adapter.models import AutoModel
 except Exception as e:
     mca_TrainingArguments = None
 
 
 logger = get_logger()
-
-
-def _get_mcore_adapters():
-    if current_platform.is_npu():
-        import megatron_adaptor  # noqa: F401
-
-    from mcore_adapter import adapters
-
-    return adapters
-
 
 # Thread-local storage for FSDP2 initialization context
 _fsdp2_init_context = threading.local()
@@ -156,18 +153,15 @@ def setup_lora_training(
 
         def get_target_modules(model: "torch.nn.Module", model_args: "ModelArguments"):
             target_modules = model_args.lora_target
-            if not {"all-linear", "all-embedding", "all-router"}.intersection(target_modules):
-                return target_modules
-            adapters = _get_mcore_adapters()
             if "all-linear" in model_args.lora_target:
                 target_modules.remove("all-linear")
-                target_modules += adapters.find_all_linear_modules(model)
+                target_modules += find_all_linear_modules(model)
             if "all-embedding" in model_args.lora_target:
                 target_modules.remove("all-embedding")
-                target_modules += adapters.find_all_embedding_modules(model)
+                target_modules += find_all_embedding_modules(model)
             if "all-router" in model_args.lora_target:
                 target_modules.remove("all-router")
-                target_modules += adapters.find_all_router_modules(model)
+                target_modules += find_all_router_modules(model)
             return target_modules
 
         target_modules = get_target_modules(model, model_args)
@@ -471,9 +465,8 @@ def default_actor_model_provider(
         if model_args.lora_target is None:
             freeze_model(model, model_args)
         else:
-            adapters = _get_mcore_adapters()
-            adapters.apply_megatron_lora()
-            adapters.set_linear_is_expert(model[0])
+            apply_megatron_lora()
+            set_linear_is_expert(model[0])
             model.models[0] = setup_lora_training(model[0].config, model[0], model_args, is_trainable, is_mca=True)
         patch_model(model, config, use_mcore=True)
     else:

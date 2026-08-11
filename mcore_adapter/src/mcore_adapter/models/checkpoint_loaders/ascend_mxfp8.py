@@ -11,18 +11,12 @@ import torch
 from transformers.configuration_utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from ...constants import (
-    ASCEND_MXFP8_CHECKPOINT_FORMAT,
     ASCEND_MXFP8_QUANT_TYPE,
     FLOAT_QUANT_TYPE,
     QUANT_MODEL_DESCRIPTION_NAME,
 )
 
-_QUANT_DESCRIPTION_META_KEYS = frozenset({
-    "quant_method",
-    "group_size",
-    "version",
-    "model_quant_type",
-})
+_QUANT_DESCRIPTION_META_KEYS = frozenset({"quant_method", "group_size", "version", "model_quant_type"})
 
 _TRAINABLE_STATE_DICT_LOADER_ENV = "ROLL_ASCEND_MXFP8_STATE_DICT_LOADER"
 _TRAINABLE_STATE_DICT_LOADER_CANDIDATES = (
@@ -46,17 +40,8 @@ class AscendMxfp8Weight:
     quant_type: str
 
 
-def is_ascend_mxfp8_checkpoint_format(value: Any) -> bool:
-    """Return True when *value* requests Ascend ModelSlim MXFP8 checkpoint loading."""
-    return str(value or "").lower() == ASCEND_MXFP8_CHECKPOINT_FORMAT
-
-
 def normalize_quant_description(raw_description: Mapping[str, Any]) -> dict[str, Any]:
-    """Normalize supported ModelSlim quant description shapes into one flat mapping.
-
-    ModelSlim files are commonly either a flat mapping with ``quant_method`` at
-    the top level, or a wrapper with a nested ``quant_description`` mapping.
-    """
+    """Normalize flat and nested ModelSlim quant descriptions."""
     if not isinstance(raw_description, Mapping):
         raise TypeError("Ascend MXFP8 quant description must be a mapping.")
 
@@ -84,27 +69,37 @@ def is_ascend_mxfp8_quant_description(description: Mapping[str, Any] | None) -> 
     return "MXFP8" in str(model_quant_type).upper()
 
 
-def load_ascend_mxfp8_quant_description(model_path: str) -> dict[str, Any]:
-    """Load a ModelSlim Ascend MXFP8 quant description from a local model directory."""
+def detect_ascend_mxfp8_quant_description(model_path: str) -> dict[str, Any] | None:
+    """Return local Ascend MXFP8 metadata when the checkpoint declares it."""
     description_path = os.path.join(model_path, QUANT_MODEL_DESCRIPTION_NAME)
     if os.path.isfile(description_path):
         with open(description_path, "r", encoding="utf-8") as f:
             description = normalize_quant_description(json.load(f))
         if not is_ascend_mxfp8_quant_description(description):
-            raise AscendMxfp8CheckpointError(
-                f"{description_path} is not an Ascend MXFP8 quant description."
-            )
+            raise AscendMxfp8CheckpointError(f"{description_path} is not an Ascend MXFP8 quant description.")
         return description
 
     config_path = os.path.join(model_path, HF_CONFIG_NAME)
-    if os.path.isfile(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            hf_config = json.load(f)
-        quantization_config = hf_config.get("quantization_config")
-        if quantization_config:
-            description = normalize_quant_description(quantization_config)
-            if is_ascend_mxfp8_quant_description(description):
-                return description
+    if not os.path.isfile(config_path):
+        return None
+    with open(config_path, "r", encoding="utf-8") as f:
+        quantization_config = json.load(f).get("quantization_config")
+    if not quantization_config:
+        return None
+
+    description = normalize_quant_description(quantization_config)
+    if is_ascend_mxfp8_quant_description(description):
+        return description
+    if str(description.get("quant_method", "")).lower() == "ascend":
+        raise AscendMxfp8CheckpointError(f"{config_path}.quantization_config is not a supported Ascend MXFP8 format.")
+    return None
+
+
+def load_ascend_mxfp8_quant_description(model_path: str) -> dict[str, Any]:
+    """Load required Ascend MXFP8 metadata from a local model directory."""
+    description = detect_ascend_mxfp8_quant_description(model_path)
+    if description is not None:
+        return description
 
     raise AscendMxfp8CheckpointError(
         f"Ascend MXFP8 checkpoint requires {QUANT_MODEL_DESCRIPTION_NAME} or "
@@ -114,21 +109,11 @@ def load_ascend_mxfp8_quant_description(model_path: str) -> dict[str, Any]:
 
 def scale_name_candidates(weight_name: str) -> tuple[str, ...]:
     """Return supported ModelSlim scale sidecar names for a quantized weight name."""
-    candidates = [
-        f"{weight_name}_scale",
-        f"{weight_name}_scale_inv",
-    ]
-    if weight_name.endswith(".weight"):
-        prefix = weight_name[: -len(".weight")]
-        candidates.extend(
-            [
-                f"{prefix}.weight_scale",
-                f"{prefix}.weight_scale_inv",
-                f"{prefix}.scale",
-                f"{prefix}.scale_inv",
-            ]
-        )
-    return tuple(dict.fromkeys(candidates))
+    candidates = (f"{weight_name}_scale", f"{weight_name}_scale_inv")
+    if not weight_name.endswith(".weight"):
+        return candidates
+    prefix = weight_name.removesuffix(".weight")
+    return (*candidates, f"{prefix}.scale", f"{prefix}.scale_inv")
 
 
 class AscendMxfp8CheckpointAdapter:
@@ -165,18 +150,11 @@ class AscendMxfp8CheckpointAdapter:
 
     def quantized_weight_names(self) -> list[str]:
         """Return all weight names declared as quantized in the description."""
-        return [
-            name
-            for name in self.quant_description
-            if name not in _QUANT_DESCRIPTION_META_KEYS and self.is_quantized_weight(name)
-        ]
+        return [name for name in self.quant_description if self.is_quantized_weight(name)]
 
     def find_scale_name(self, weight_name: str, state_dict: Mapping[str, torch.Tensor]) -> str | None:
         """Find the scale sidecar name present in *state_dict* for *weight_name*."""
-        for scale_name in scale_name_candidates(weight_name):
-            if scale_name in state_dict:
-                return scale_name
-        return None
+        return next((name for name in scale_name_candidates(weight_name) if name in state_dict), None)
 
     def get_quantized_weight(
         self,
@@ -213,11 +191,9 @@ class AscendMxfp8CheckpointAdapter:
         is_needed_name: Callable[[str], bool] | None = None,
     ) -> None:
         """Validate that every needed quantized weight has its scale sidecar."""
-        is_needed_name = is_needed_name or (lambda _name: True)
         for weight_name in self.quantized_weight_names():
-            if not is_needed_name(weight_name) or weight_name not in state_dict:
-                continue
-            self.get_quantized_weight(weight_name, state_dict)
+            if (is_needed_name is None or is_needed_name(weight_name)) and weight_name in state_dict:
+                self.get_quantized_weight(weight_name, state_dict)
 
 
 def _load_symbol(reference: str) -> Callable[..., Any] | None:
@@ -233,20 +209,11 @@ def _load_symbol(reference: str) -> Callable[..., Any] | None:
 
 
 def get_trainable_mxfp8_state_dict_loader() -> Callable[..., dict[str, torch.Tensor]] | None:
-    """Discover an optional MindSpeed-TE loader for trainable ModelSlim MXFP8 params.
-
-    The loader must accept keyword arguments ``model_path``, ``config``,
-    ``converter``, ``vp_stage`` and ``adapter``, then return a Megatron-Core
-    state dict for the current virtual pipeline stage.  Deployments should
-    prefer ``ROLL_ASCEND_MXFP8_STATE_DICT_LOADER`` when the installed MindSpeed
-    package does not expose one of the stable entry points.
-    """
+    """Discover the configured or built-in MindSpeed-TE MXFP8 state-dict loader."""
     user_loader = os.getenv(_TRAINABLE_STATE_DICT_LOADER_ENV)
-    if user_loader:
-        return _load_symbol(user_loader)
-
-    for candidate in _TRAINABLE_STATE_DICT_LOADER_CANDIDATES:
-        loader = _load_symbol(candidate)
+    references = (user_loader,) if user_loader else _TRAINABLE_STATE_DICT_LOADER_CANDIDATES
+    for reference in references:
+        loader = _load_symbol(reference)
         if loader is not None:
             return loader
     return None

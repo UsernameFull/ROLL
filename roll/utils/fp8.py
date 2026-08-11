@@ -1,95 +1,52 @@
 from collections.abc import Mapping
-from typing import Any, List, Optional
+from typing import Any, List
 
 import torch
 
-_NPU_AVAILABLE = False
-try:
-    import torch_npu  # noqa: F401
 
-    _NPU_AVAILABLE = hasattr(torch, "npu") and torch.npu.is_available()
-except ImportError:
-    pass
+def _get_quant_config_value(config: Any, key: str, default: Any = None) -> Any:
+    return config.get(key, default) if isinstance(config, Mapping) else getattr(config, key, default)
 
 
-def _get_quant_config_value(quant_config: Any, key: str, default: Any = None) -> Any:
-    if isinstance(quant_config, Mapping):
-        return quant_config.get(key, default)
-    return getattr(quant_config, key, default)
+def _is_ascend_config(config: Any) -> bool:
+    return str(_get_quant_config_value(config, "quant_method", "")).lower() == "ascend"
 
 
-def _is_ascend_quant_description(quant_description: Any) -> bool:
-    if isinstance(quant_description, Mapping):
-        return str(quant_description.get("quant_method", "")).lower() == "ascend"
-    return False
-
-
-def is_mxfp8_ascend(quant_config) -> bool:
-    """Detect whether the quant_config represents an Ascend MXFP8 configuration.
-
-    Ascend NPUs use ``vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig``
-    with ``quant_method == "ascend"`` instead of vLLM's native ``Fp8Config``.
-
-    Args:
-        quant_config: The vLLM or SGLang quantization config object.
-
-    Returns:
-        True if this is an Ascend MXFP8 config.
-    """
+def is_mxfp8_ascend(quant_config: Any) -> bool:
+    """Return whether this is an Ascend MXFP8 configuration."""
     if quant_config is None:
         return False
 
-    if str(_get_quant_config_value(quant_config, "quant_method", "")).lower() == "ascend":
-        return True
-
-    if _is_ascend_quant_description(_get_quant_config_value(quant_config, "quant_description")):
-        return True
-
-    quantization_config = _get_quant_config_value(quant_config, "quantization_config")
-    if _is_ascend_quant_description(quantization_config):
-        return True
-
-    return quant_config.__class__.__name__ == "AscendModelSlimConfig"
+    return (
+        quant_config.__class__.__name__ == "AscendModelSlimConfig"
+        or _is_ascend_config(quant_config)
+        or any(
+            _is_ascend_config(_get_quant_config_value(quant_config, key))
+            for key in ("quant_description", "quantization_config")
+        )
+    )
 
 
 def per_block_fp8_quant_ascend(
     param_value: torch.Tensor,
-    dtype: Optional[torch.dtype] = None,
+    dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize a weight tensor to MXFP8 format using Ascend NPU dynamic quantization.
+    """Quantize a tensor using Ascend MXFP8 dynamic quantization."""
+    try:
+        import torch_npu
+    except ImportError as exc:
+        raise RuntimeError("torch_npu is required for Ascend MXFP8 quantization.") from exc
 
-    On Ascend NPUs, MXFP8 (Microscaling FP8) uses a different block-sharing
-    scheme for scales compared to NVIDIA's blockwise FP8.  This function wraps
-    ``torch_npu.npu_dynamic_mx_quant`` which performs the quantization with
-    the correct MX format.
+    npu = getattr(torch, "npu", None)
+    if npu is None or not npu.is_available():
+        raise RuntimeError("No available Ascend NPU was detected.")
 
-    Args:
-        param_value: Input high-precision tensor (bf16/fp16).
-        dtype: Cast target before quantization (default: ``torch.bfloat16``).
-
-    Returns:
-        Tuple of ``(quantized_weight, scale)``:
-            - quantized_weight: FP8 quantized tensor.
-            - scale: Per-block scale factors (inverse scale).
-    """
-    if not _NPU_AVAILABLE:
-        raise RuntimeError(
-            "Ascend NPU is required for MXFP8 quantization but torch_npu "
-            "is not available.  Install torch_npu and ensure NPU devices "
-            "are visible."
-        )
-
-    if dtype is None:
-        dtype = torch.bfloat16
-
-    param_lp, param_scale = torch_npu.npu_dynamic_mx_quant(
-        param_value.to(dtype),
+    weight, scale = torch_npu.npu_dynamic_mx_quant(
+        param_value.to(dtype or torch.bfloat16),
         axis=-1,
         dst_type=torch_npu.float8_e4m3fn,
     )
-    param_scale = param_scale.flatten(-2, -1)
-
-    return param_lp, param_scale
+    return weight, scale.flatten(-2, -1)
 
 
 # Block quant operator

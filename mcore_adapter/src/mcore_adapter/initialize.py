@@ -1,34 +1,20 @@
 import os
 import random
-from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 from megatron.core import mpu, tensor_parallel
 
-from .platforms import current_platform
-from .utils import get_logger
 from .npu_runtime import (
-    apply_megatron_adaptor_feature_defaults,
-    bootstrap_npu_runtime,
-    ensure_npu_transformer_engine_symbols,
-    sync_megatron_adaptor_args,
+    bootstrap_npu_runtime as _bootstrap_npu_runtime,
+    sync_megatron_adaptor_args as _sync_megatron_adaptor_args,
 )
-
-if TYPE_CHECKING:
-    from .training_args import TrainingArguments
+from .platforms import current_platform
+from .training_args import TrainingArguments
+from .utils import get_logger
 
 
 logger = get_logger(__name__)
-
-__all__ = [
-    "apply_megatron_adaptor_feature_defaults",
-    "bootstrap_npu_runtime",
-    "ensure_npu_transformer_engine_symbols",
-    "initialize_megatron",
-    "is_distribute_initialized",
-    "sync_megatron_adaptor_args",
-]
 
 
 def is_distribute_initialized():
@@ -54,8 +40,8 @@ def _set_random_seed(seed_):
 
 
 def initialize_megatron(args: "TrainingArguments"):
-    bootstrap_npu_runtime()
-    sync_megatron_adaptor_args(args)
+    _bootstrap_npu_runtime()
+    _sync_megatron_adaptor_args(args)
     if not is_distribute_initialized():
         _initialize_distributed(args)
     _set_random_seed(args.seed)

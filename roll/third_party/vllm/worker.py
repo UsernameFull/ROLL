@@ -7,16 +7,12 @@ from typing import Iterable, Tuple
 import torch
 
 from roll.platforms import current_platform
-from roll.third_party.vllm.gdn_patcher import patch_gdn_attention
 from roll.third_party.vllm.vllm_utils import TensorLoRARequest, patch_vllm_lora_manager
 from roll.utils.collective import collective
 from roll.utils.cuda_ipc_utils import MultiprocessingSerializer
 from roll.utils.fp8 import is_mxfp8_ascend
 from roll.utils.logging import get_logger
 from roll.utils.send_recv_utils import monkey_patch_torch_reductions, named_tensors_from_bucket
-
-# EngineCore 子进程加载 worker_extension_cls 时会导入本模块，因此必须在导入期打补丁。
-patch_gdn_attention()
 
 logger = get_logger()
 
@@ -131,7 +127,7 @@ class WorkerBase:
             master_addr=master_address,
             master_port=master_port,
         )
-        logger.info("setup_collective_group: %s rank: %s world_size: %s", group_name, group_rank, world_size)
+        logger.info(f"setup_collective_group: {group_name} rank: {group_rank} world_size: {world_size}")
 
     def broadcast_parameter(self, names, dtypes, shapes, group_name, is_lora=False):
         weights_and_handles = []
@@ -150,7 +146,7 @@ class WorkerBase:
             for name, weight in weights_iter():
                 self.tensor_lora_manager.add_weight(name, weight)
             return
-        self.load_weights(weights_iter())
+        self.load_weights(weights=weights_iter())
 
     def update_parameter_in_bucket(self, serialized_named_tensors, is_lora=False):
         monkey_patch_torch_reductions()
@@ -182,7 +178,8 @@ class WorkerV1(WorkerBase):
         super().custom_init_worker(*args, **kwargs)
         patch_vllm_lora_manager()
 
-    # worker_extension_cls methods must not conflict with vLLM worker methods.
+    # Use custom prefix because worker_extension_cls can not has
+    # conflicting method name with vllm worker.
     def custom_add_lora(self, peft_config) -> bool:
         lora_request = self.tensor_lora_manager.build_request(peft_config)
         super().reload_model()

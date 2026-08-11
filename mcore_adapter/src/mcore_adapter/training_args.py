@@ -6,7 +6,6 @@ from megatron.core.transformer.pipeline_parallel_layer_layout import PipelinePar
 from transformers import Seq2SeqTrainingArguments as HFSeq2SeqTrainingArguments
 from transformers import TrainingArguments as HFTrainingArguments
 
-from .constants import ASCEND_MXFP8_CHECKPOINT_FORMAT
 from .platforms import current_platform
 from .utils import get_logger
 
@@ -265,12 +264,6 @@ class DistributingParallelArguments:
         default=False,
         metadata={"help": "If true, use trainable fp8 weights during Megatron training instead of bf16."},
     )
-    quantized_checkpoint_format: Optional[Literal["ascend_mxfp8"]] = field(
-        default=None,
-        metadata={
-            "help": "Format of an already-quantized HF checkpoint. Currently only 'ascend_mxfp8' is supported."
-        },
-    )
     fp8: Optional[str] = field(
         default=None,
         metadata={
@@ -325,7 +318,7 @@ class DistributingParallelArguments:
         if self.fp8_format and self.fp8 is None:
             self.fp8 = self.fp8_format
         # Ascend uses TransformerEngine for both reduced-precision and FP8 paths;
-        # the FP8 recipe is controlled independently by ``self.fp8``.
+        # the FP8 format and recipe are configured independently by ``self.fp8`` and ``self.fp8_recipe``.
         if current_platform.is_npu() and self.transformer_impl in (None, "local"):
             self.transformer_impl = "transformer_engine"
         if self.fp8 and self.transformer_impl == "local":
@@ -373,12 +366,10 @@ class DistributingParallelArguments:
             self.transformer_impl = "transformer_engine"
         if self.transformer_impl != "transformer_engine":
             raise ValueError("fp8_param=True requires transformer_impl='transformer_engine'.")
-        if self.fp8 != "e4m3":
-            raise ValueError("fp8_param=True requires fp8='e4m3' or fp8_format='e4m3'.")
-        if self.fp8_recipe != "mxfp8":
-            raise ValueError("fp8_param=True requires fp8_recipe='mxfp8'.")
-        if self.quantized_checkpoint_format != ASCEND_MXFP8_CHECKPOINT_FORMAT:
-            raise ValueError("fp8_param=True requires quantized_checkpoint_format='ascend_mxfp8'.")
+        if not self.fp8:
+            raise ValueError("fp8_param=True requires fp8 or fp8_format to be set.")
+        if not self.fp8_recipe:
+            raise ValueError("fp8_param=True requires fp8_recipe to be set.")
 
     def get_config_dict(self):
         config_dict = {f.name: getattr(self, f.name) for f in fields(self) if getattr(self, f.name) is not None}

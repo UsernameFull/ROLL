@@ -3,14 +3,14 @@ from functools import partial
 from typing import List
 
 import torch
-import vllm
-from packaging.version import Version
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config, Fp8LinearMethod, Fp8MoEMethod)
-from vllm.model_executor.parameter import BlockQuantScaleParameter, ModelWeightParameter
+from vllm.model_executor.parameter import (BlockQuantScaleParameter,
+                                           ModelWeightParameter,
+                                           PerTensorScaleParameter)
 from vllm.platforms import current_platform
 from vllm.model_executor.utils import set_weight_attrs
 from vllm._custom_ops import scaled_fp8_quant as per_tensor_fp8_quant
@@ -20,10 +20,6 @@ from roll.utils.fp8 import is_mxfp8_ascend, per_block_fp8_quant, per_block_fp8_q
 from roll.utils.logging import get_logger
 
 logger = get_logger()
-
-_USE_LEGACY_FP8_PATCHES = not (
-    current_platform.is_npu() and Version(vllm.__version__) >= Version("0.23.0")
-)
 
 
 def update_quant_config(config, vllm_config):
@@ -159,7 +155,7 @@ def _fp8_linear_create_weights(
     layer.register_parameter("input_scale", None)
 
 _original_fp8_linear_create_weights = Fp8LinearMethod.create_weights
-if _USE_LEGACY_FP8_PATCHES:
+if not current_platform.is_npu():
     Fp8LinearMethod.create_weights = _fp8_linear_create_weights
 
 def _fp8_linear_process_weights_after_loading(self, layer: Module) -> None:
@@ -167,7 +163,7 @@ def _fp8_linear_process_weights_after_loading(self, layer: Module) -> None:
         _original_fp8_linear_process_weights_after_loading(self, layer)
 
 _original_fp8_linear_process_weights_after_loading = Fp8LinearMethod.process_weights_after_loading
-if _USE_LEGACY_FP8_PATCHES:
+if not current_platform.is_npu():
     Fp8LinearMethod.process_weights_after_loading = _fp8_linear_process_weights_after_loading
 
 def _fp8_moe_w13_weight_loader(layer: weakref.ReferenceType, original_weight_loader, param: torch.Tensor, loaded_weight: torch.Tensor, *args, **kwargs) -> None:
@@ -256,7 +252,7 @@ def _fp8_moe_create_weights(self, layer: Module, num_experts: int, hidden_size: 
     assert type(layer.w2_weight_scale_inv) == Parameter
 
 _original_fp8_moe_create_weights = Fp8MoEMethod.create_weights
-if _USE_LEGACY_FP8_PATCHES:
+if not current_platform.is_npu():
     Fp8MoEMethod.create_weights = _fp8_moe_create_weights
 
 def _fp8_moe_process_weights_after_loading(self, layer: Module) -> None:
@@ -282,7 +278,7 @@ def _fp8_moe_process_weights_after_loading(self, layer: Module) -> None:
             assert w2_scale.data_ptr() == getattr(layer, f"w2_{self.weight_scale_name}").data_ptr()
 
 _original_fp8_moe_process_weights_after_loading = Fp8MoEMethod.process_weights_after_loading
-if _USE_LEGACY_FP8_PATCHES:
+if not current_platform.is_npu():
     Fp8MoEMethod.process_weights_after_loading = _fp8_moe_process_weights_after_loading
 
 

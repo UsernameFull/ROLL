@@ -15,12 +15,9 @@ from megatron.core.transformer.pipeline_parallel_layer_layout import PipelinePar
 from transformers import AutoConfig
 from transformers.configuration_utils import CONFIG_NAME as HF_CONFIG_NAME
 
-from ..constants import (
-    ASCEND_MXFP8_CHECKPOINT_FORMAT,
-    HUGGINGFACE_AUTOMAP_CACHE,
-    MCA_CONFIG_NAME,
-)
-from ..initialize import apply_megatron_adaptor_feature_defaults, initialize_megatron
+from ..constants import HUGGINGFACE_AUTOMAP_CACHE, MCA_CONFIG_NAME
+from ..initialize import initialize_megatron
+from ..npu_runtime import apply_megatron_adaptor_feature_defaults
 from ..platforms import current_platform
 from ..training_args import DistributingParallelArguments, TrainingArguments
 from ..utils import get_logger
@@ -327,20 +324,7 @@ class McaModelConfig(TransformerConfig, PretrainedConfig):
             "set to true when etp_size != tp_size"
         }
     )
-    quantized_checkpoint_format: Optional[Literal["ascend_mxfp8"]] = field(
-        default=None,
-        metadata={
-            "help": "Format of an already-quantized HF checkpoint. Currently only 'ascend_mxfp8' is supported."
-        },
-    )
-
     def __post_init__(self):
-        if (
-            self.quantized_checkpoint_format is not None
-            and self.quantized_checkpoint_format != ASCEND_MXFP8_CHECKPOINT_FORMAT
-        ):
-            raise ValueError(f"Unsupported quantized_checkpoint_format: {self.quantized_checkpoint_format}")
-
         fp8_enabled = bool(getattr(self, "fp8", None) or getattr(self, "fp8_format", None))
         # Keep NPU BF16/FP16 and FP8 model construction on the same TE path.
         if current_platform.is_npu() and self.transformer_impl in (None, "local"):

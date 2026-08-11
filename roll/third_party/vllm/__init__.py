@@ -21,15 +21,6 @@ from roll.utils.vllm_online_quantization import apply_online_quantization_config
 
 logger = get_logger()
 
-if current_platform.is_npu():
-    expected = {"vllm": "0.23.0", "vllm-ascend": "0.23.0rc1"}
-    try:
-        installed = {package: version(package) for package in expected}
-    except PackageNotFoundError as exc:
-        raise RuntimeError(f"Ascend FP8 requires {expected}; missing package: {exc.name}.") from exc
-    if installed != expected:
-        raise RuntimeError(f"Ascend FP8 requires {expected}, but found {installed}.")
-
 if Version("0.8.4") == Version(vllm.__version__):
     import roll.third_party.vllm.vllm_0_8_4 # apply patch
     ray_executor_class_v0 = safe_import_class("roll.third_party.vllm.vllm_0_8_4.ray_distributed_executor.CustomRayDistributedExecutor")

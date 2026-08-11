@@ -58,8 +58,8 @@ scale tensor，再将权重打包和运行时准备交给 vLLM-Ascend 0.23 的�
 
 ### ModelSlim 预量化训练
 
-通过显式配置 `quantized_checkpoint_format: ascend_mxfp8` 选择该路径。轻量
-checkpoint adapter 负责读取 ModelSlim 量化元数据、区分量化权重与浮点权重，
+通过 checkpoint 内的 ModelSlim 量化元数据自动识别该路径。轻量 checkpoint
+adapter 负责读取量化元数据、区分量化权重与浮点权重，
 并为每个量化权重匹配对应的 scale sidecar。
 
 adapter 不自行实现 QKV 合并、MoE 权重合并或分布式分片，而是通过一个固定的
@@ -95,8 +95,10 @@ MindSpeed-TE loader 接口完成这些操作。如果 loader 不可用，或者 
 
 - 启动时拒绝不受支持的依赖版本，并在错误信息中列出预期版本组合。
 - 拒绝相互冲突的 `quantization` 和 `online_quantization` 配置。
-- 除非 NPU、TransformerEngineNPU、MXFP8 recipe 和显式 ModelSlim checkpoint
-  格式同时启用，否则拒绝 `fp8_param=True`。
+- `fp8_param=True` 时要求用户提供 FP8 format 和 recipe，但不在 ROLL 中限制具体值；
+  配置原样传递给 Megatron/MindSpeed 校验和执行。
+- 除非 NPU、TransformerEngineNPU 和可识别的 ModelSlim MXFP8 checkpoint 同时
+  启用，否则拒绝 `fp8_param=True`。
 - 拒绝缺失或格式错误的量化元数据，以及缺失 scale tensor 的 checkpoint。
 - 缺少 MindSpeed-TE 可训练 loader 时直接报错，不回退为反量化参数。
 

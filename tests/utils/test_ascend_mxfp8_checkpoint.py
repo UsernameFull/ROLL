@@ -5,12 +5,13 @@ from types import ModuleType
 import pytest
 import torch
 
-import mcore_adapter.models.converter.ascend_mxfp8 as ascend_mxfp8
-from mcore_adapter.models.converter.ascend_mxfp8 import (
+import mcore_adapter.models.checkpoint_loaders.ascend_mxfp8 as ascend_mxfp8
+from mcore_adapter.models.checkpoint_loaders.ascend_mxfp8 import (
     ASCEND_MXFP8_QUANT_TYPE,
     FLOAT_QUANT_TYPE,
     AscendMxfp8CheckpointAdapter,
     AscendMxfp8CheckpointError,
+    detect_ascend_mxfp8_quant_description,
     load_ascend_mxfp8_quant_description,
     require_trainable_mxfp8_state_dict_loader,
     scale_name_candidates,
@@ -54,6 +55,20 @@ def test_load_quant_description_from_hf_config(tmp_path):
 
     assert description["quant_method"] == "ascend"
     assert description["model.layers.0.mlp.down_proj.weight"] == ASCEND_MXFP8_QUANT_TYPE
+
+
+def test_detect_quant_description_returns_none_for_standard_hf_checkpoint(tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3"}), encoding="utf-8")
+
+    assert detect_ascend_mxfp8_quant_description(str(tmp_path)) is None
+
+
+def test_detect_quant_description_rejects_unsupported_ascend_format(tmp_path):
+    config = {"quantization_config": {"quant_method": "ascend", "model_quant_type": "W8A8"}}
+    (tmp_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(AscendMxfp8CheckpointError, match="not a supported Ascend MXFP8 format"):
+        detect_ascend_mxfp8_quant_description(str(tmp_path))
 
 
 def test_checkpoint_adapter_pairs_quantized_weight_with_scale():

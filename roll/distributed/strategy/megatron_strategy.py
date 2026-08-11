@@ -1134,10 +1134,10 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         if (
             current_platform.is_npu()
             and self.use_sequence_packing
-            and getattr(self.megatron_train_args, "fp8", None)
+            and getattr(self.megatron_train_args, "transformer_impl", None) == "transformer_engine"
         ):
             raise ValueError(
-                "Ascend Megatron FP8 training does not support use_sequence_packing yet; "
+                "Ascend Megatron Transformer Engine training does not support use_sequence_packing yet; "
                 "disable use_sequence_packing to avoid NPU varlen fused attention failures."
             )
 

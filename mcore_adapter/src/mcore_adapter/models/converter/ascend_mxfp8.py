@@ -10,7 +10,7 @@ from typing import Any
 import torch
 from transformers.configuration_utils import CONFIG_NAME as HF_CONFIG_NAME
 
-from ...quantization import (
+from ...constants import (
     ASCEND_MXFP8_CHECKPOINT_FORMAT,
     ASCEND_MXFP8_QUANT_TYPE,
     FLOAT_QUANT_TYPE,

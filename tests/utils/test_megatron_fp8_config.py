@@ -41,6 +41,16 @@ def test_training_args_accepts_ascend_mxfp8_fp8_param(monkeypatch):
     assert args.transformer_impl == "transformer_engine"
 
 
+@pytest.mark.parametrize("transformer_impl", [None, "local"])
+def test_training_args_uses_transformer_engine_for_npu_bf16(monkeypatch, transformer_impl):
+    monkeypatch.setattr("mcore_adapter.training_args.current_platform.is_npu", lambda: True)
+
+    args = TrainingArguments(output_dir="tmp", transformer_impl=transformer_impl)
+
+    assert args.transformer_impl == "transformer_engine"
+    assert args.fp8 is None
+
+
 def test_training_args_rejects_fp8_param_without_quantized_checkpoint_format(monkeypatch):
     monkeypatch.setattr("mcore_adapter.training_args.current_platform.is_npu", lambda: True)
 

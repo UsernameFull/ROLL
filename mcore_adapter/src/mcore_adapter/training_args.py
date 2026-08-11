@@ -6,8 +6,8 @@ from megatron.core.transformer.pipeline_parallel_layer_layout import PipelinePar
 from transformers import Seq2SeqTrainingArguments as HFSeq2SeqTrainingArguments
 from transformers import TrainingArguments as HFTrainingArguments
 
+from .constants import ASCEND_MXFP8_CHECKPOINT_FORMAT
 from .platforms import current_platform
-from .quantization import ASCEND_MXFP8_CHECKPOINT_FORMAT
 from .utils import get_logger
 
 
@@ -324,7 +324,9 @@ class DistributingParallelArguments:
             self.fp8_format = self.fp8
         if self.fp8_format and self.fp8 is None:
             self.fp8 = self.fp8_format
-        if self.fp8 and self.transformer_impl == "local" and current_platform.is_npu():
+        # Ascend uses TransformerEngine for both reduced-precision and FP8 paths;
+        # the FP8 recipe is controlled independently by ``self.fp8``.
+        if current_platform.is_npu() and self.transformer_impl in (None, "local"):
             self.transformer_impl = "transformer_engine"
         if self.fp8 and self.transformer_impl == "local":
             raise ValueError("Megatron FP8 training requires transformer_impl='transformer_engine'.")

@@ -84,7 +84,7 @@ class Qwen3VLTransformerBlock(TransformerBlock):
 
         def checkpoint_handler(forward_func):
             """Determines whether to use the `te_checkpoint` or `tensor_parallel.checkpoint`"""
-            if self.config.fp8:
+            if self.config.transformer_impl == "transformer_engine":
                 return te_checkpoint(
                     forward_func,
                     self.config.distribute_saved_activations,

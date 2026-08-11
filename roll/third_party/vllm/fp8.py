@@ -11,11 +11,12 @@ from vllm.model_executor.layers.quantization.fp8 import (
 from vllm.model_executor.parameter import (BlockQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
-from vllm.platforms import current_platform
+from vllm.platforms import current_platform as vllm_platform
 from vllm.model_executor.utils import set_weight_attrs
 from vllm._custom_ops import scaled_fp8_quant as per_tensor_fp8_quant
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import requantize_with_max_scale
 
+from roll.platforms import current_platform as roll_platform
 from roll.utils.fp8 import is_mxfp8_ascend, per_block_fp8_quant, per_block_fp8_quant_ascend
 from roll.utils.logging import get_logger
 
@@ -129,8 +130,8 @@ def _fp8_linear_create_weights(
     assert not self.use_marlin # not implement yet, because lack weight loader for chanelwise weight_scale
 
     # TODO support ROCM
-    assert not current_platform.is_rocm()
-    assert not current_platform.is_fp8_fnuz()
+    assert not vllm_platform.is_rocm()
+    assert not vllm_platform.is_fp8_fnuz()
 
     # store essential config in layer for custom weight loader
     layer.weight_block_size = self.quant_config.weight_block_size
@@ -155,7 +156,7 @@ def _fp8_linear_create_weights(
     layer.register_parameter("input_scale", None)
 
 _original_fp8_linear_create_weights = Fp8LinearMethod.create_weights
-if not current_platform.is_npu():
+if not roll_platform.is_npu():
     Fp8LinearMethod.create_weights = _fp8_linear_create_weights
 
 def _fp8_linear_process_weights_after_loading(self, layer: Module) -> None:
@@ -163,7 +164,7 @@ def _fp8_linear_process_weights_after_loading(self, layer: Module) -> None:
         _original_fp8_linear_process_weights_after_loading(self, layer)
 
 _original_fp8_linear_process_weights_after_loading = Fp8LinearMethod.process_weights_after_loading
-if not current_platform.is_npu():
+if not roll_platform.is_npu():
     Fp8LinearMethod.process_weights_after_loading = _fp8_linear_process_weights_after_loading
 
 def _fp8_moe_w13_weight_loader(layer: weakref.ReferenceType, original_weight_loader, param: torch.Tensor, loaded_weight: torch.Tensor, *args, **kwargs) -> None:
@@ -206,9 +207,9 @@ def _fp8_moe_create_weights(self, layer: Module, num_experts: int, hidden_size: 
 
     # TODO support ROCM
     # https://github.com/vllm-project/vllm/blob/v0.8.4/vllm/model_executor/layers/quantization/fp8.py#L655
-    assert not current_platform.is_rocm()
-    assert not current_platform.is_fp8_fnuz()
-    assert current_platform.fp8_dtype() == torch.float8_e4m3fn
+    assert not vllm_platform.is_rocm()
+    assert not vllm_platform.is_fp8_fnuz()
+    assert vllm_platform.fp8_dtype() == torch.float8_e4m3fn
 
     self.rocm_aiter_moe_enabled = False # set in original process_weights_after_loading
 
@@ -252,7 +253,7 @@ def _fp8_moe_create_weights(self, layer: Module, num_experts: int, hidden_size: 
     assert type(layer.w2_weight_scale_inv) == Parameter
 
 _original_fp8_moe_create_weights = Fp8MoEMethod.create_weights
-if not current_platform.is_npu():
+if not roll_platform.is_npu():
     Fp8MoEMethod.create_weights = _fp8_moe_create_weights
 
 def _fp8_moe_process_weights_after_loading(self, layer: Module) -> None:
@@ -278,7 +279,7 @@ def _fp8_moe_process_weights_after_loading(self, layer: Module) -> None:
             assert w2_scale.data_ptr() == getattr(layer, f"w2_{self.weight_scale_name}").data_ptr()
 
 _original_fp8_moe_process_weights_after_loading = Fp8MoEMethod.process_weights_after_loading
-if not current_platform.is_npu():
+if not roll_platform.is_npu():
     Fp8MoEMethod.process_weights_after_loading = _fp8_moe_process_weights_after_loading
 
 

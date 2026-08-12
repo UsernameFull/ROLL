@@ -1356,7 +1356,8 @@ class MegatronTrainStrategy(MegatronInferStrategy, TrainStrategy):
         for mini_metrics in metrics_tensors:
             append_to_dict(metrics, mini_metrics)
 
-        metrics.update({self.worker_config.name + "/" + "grad_norm": grad_norm})
+        grad_norm_value = grad_norm.detach().item() if isinstance(grad_norm, torch.Tensor) else grad_norm
+        metrics.update({self.worker_config.name + "/" + "grad_norm": grad_norm_value})
 
         if self.model.config.num_moe_experts is not None and self.model.config.num_moe_experts > 1:
             reduce_aux_losses_tracker_across_ranks()

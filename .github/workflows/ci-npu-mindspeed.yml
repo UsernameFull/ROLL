@@ -47,7 +47,7 @@ jobs:
   megatron-adaptor-npu-test:
     name: MegatronAdaptor 0.17 Core NPU Tests
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: linux-aarch64-a3-4
+    runs-on: linux-aarch64-a3-800i-4
     timeout-minutes: 90
     container:
       image: quay.io/ascend/vllm-ascend:v0.18.0-a3

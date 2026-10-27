@@ -23,6 +23,12 @@ from roll.utils.send_recv_utils import monkey_patch_torch_reductions, named_tens
 from roll.third_party.vllm.gdn_patcher import patch_gdn_attention
 patch_gdn_attention()
 
+if current_platform.device_type == "npu":
+    from roll.third_party.vllm.vllm_npu_patch import patch_vllm_ascend_moe_metadata, validate_npu_ipc_bucket
+
+    # worker_extension_cls is imported before model loading in each worker.
+    patch_vllm_ascend_moe_metadata()
+
 logger = get_logger()
 
 
@@ -142,6 +148,8 @@ class WorkerBase:
         bucket_with_meta = MultiprocessingSerializer.deserialize(
             serialized_named_tensors[self.rank]
         )
+        if current_platform.device_type == "npu":
+            validate_npu_ipc_bucket(bucket_with_meta["bucket"], self.device)
         named_params = named_tensors_from_bucket(**bucket_with_meta)
         if is_lora:
             for name, weight in named_params:

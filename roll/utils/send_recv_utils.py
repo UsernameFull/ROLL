@@ -157,8 +157,10 @@ class RecvBucketManager:
 def monkey_patch_torch_reductions():
     """Monkey patching before Torch https://github.com/pytorch/pytorch/pull/149248 is fixed"""
 
-    # Currently, NPU does not support UUID. This has been temporarily commented out, with support expected in the fourth quarter.
     if current_platform.device_type == "npu":
+        from roll.third_party.vllm.vllm_npu_patch import patch_npu_ipc_reductions
+
+        patch_npu_ipc_reductions()
         return
 
     if hasattr(reductions, "_reduce_tensor_original"):

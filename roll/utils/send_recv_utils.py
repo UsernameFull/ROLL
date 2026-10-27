@@ -259,9 +259,18 @@ def _bucket_named_tensors(named_tensors: list[tuple[str, torch.Tensor]]) -> tupl
 
         tensors_meta = []
         flattened_tensors = []
+        device = (
+            torch.device("npu", current_platform.current_device())
+            if current_platform.device_type == "npu"
+            else None
+        )
 
         current_idx = 0
         for i, (name, tensor) in enumerate(named_tensors):
+            # CPU offload can mix CPU parameters with gathered NPU weights.
+            # Normalize before cat; moving the completed bucket is too late.
+            if device is not None:
+                tensor = tensor.to(device)
             flattened = tensor.flatten().view(torch.int8)
 
             numel = flattened.numel()
